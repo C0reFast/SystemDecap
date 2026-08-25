@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+"""Install-free launcher for System Decap."""
+from system_decap.cli import main
+
+raise SystemExit(main())

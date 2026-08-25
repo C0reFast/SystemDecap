@@ -1,0 +1,40 @@
+# CMake and native build outputs
+/build/
+/cmake-build-*/
+/out/
+CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+Testing/
+build.ninja
+.ninja_deps
+.ninja_log
+cmake_install.cmake
+compile_commands.json
+
+# Generated benchmark reports and local visual artifacts
+/reports/
+/.artifacts/
+perf.data
+perf.data.old
+
+# Python bytecode, test caches, coverage, and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Editors and operating-system metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
