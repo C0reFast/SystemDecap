@@ -50,6 +50,39 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(rendered.count('<td class="measured"'), 6)
         self.assertIn("共实测 3 个无向核心对", rendered)
 
+    def test_microbenchmark_parity_charts_have_chinese_titles(self):
+        report = self._base_report("quick")
+        report["observations"] = [
+            {"group": "loaded_memory_latency", "metric": "random_load_latency_under_load",
+             "value": 91.0, "unit": "ns/access", "confidence": "medium", "method": "probe",
+             "labels": {"load_threads": "0", "measured_load_gbps": "0"}},
+            {"group": "page_policy", "metric": "random_load_latency", "value": 80.0,
+             "unit": "ns/access", "confidence": "medium", "method": "probe",
+             "labels": {"policy": "thp-advised", "anon_huge_bytes": "2097152"}},
+            {"group": "store_forwarding", "metric": "store_load_latency", "value": 3.2,
+             "unit": "ns/pair", "confidence": "medium", "method": "probe",
+             "labels": {"case": "partial-4-to-8"}},
+            {"group": "instruction_fetch", "metric": "code_delivery_bandwidth", "value": 48.0,
+             "unit": "GB/s", "confidence": "medium", "method": "probe",
+             "labels": {"working_set_bytes": "32768", "instruction_bytes": "4"}},
+            {"group": "compute_scaling", "metric": "integer_add_throughput", "value": 20.0,
+             "unit": "Gop/s", "confidence": "medium", "method": "probe",
+             "labels": {"threads": "1", "scope": "physical-cores"}},
+            {"group": "branch_structure", "metric": "btb_branch_latency", "value": 0.5,
+             "unit": "ns/branch", "confidence": "low", "method": "probe",
+             "labels": {"branch_count": "64", "spacing_bytes": "16",
+                        "branch_type": "unconditional"}},
+        ]
+        rendered = render_report(report)
+        for title in (
+            "带宽压力下的随机内存延迟", "基础页与透明大页策略对比",
+            "Store-to-load forwarding 对齐代价", "指令侧代码输送吞吐与足迹",
+            "整数微内核的多核与 SMT 吞吐扩展", "BTB 无条件跳转足迹压力",
+            "BTB 始终跳转条件分支足迹压力",
+            "返回地址栈（RAS）深度压力", "间接分支目标数量压力",
+        ):
+            self.assertIn(title, rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

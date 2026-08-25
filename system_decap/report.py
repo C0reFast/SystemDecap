@@ -31,13 +31,20 @@ KERNEL_ZH = {
     "integer_add_parallel8": "整数加法·8 条并行链",
     "integer_mul_dependency": "整数乘法·依赖链",
     "integer_mul_parallel4": "整数乘法·4 条并行链",
+    "fp64_add_dependency": "FP64 加法·依赖链",
+    "fp64_add_parallel4": "FP64 加法·4 条并行链",
+    "fp64_mul_dependency": "FP64 乘法·依赖链",
+    "fp64_mul_parallel4": "FP64 乘法·4 条并行链",
 }
 GROUP_ZH = {
     "timer": "计时器", "cache_latency": "缓存延迟", "tlb_latency": "TLB 延迟",
     "memory_bandwidth": "内存带宽", "cache_bandwidth": "缓存带宽",
     "memory_access": "内存访问", "memory_parallelism": "内存级并行",
+    "page_policy": "页面策略", "loaded_memory_latency": "带载内存延迟",
+    "store_forwarding": "存储转发", "instruction_fetch": "指令侧带宽",
     "core_latency": "核间延迟", "coherence": "缓存一致性", "numa": "NUMA",
     "pipeline": "核心流水线", "branch": "分支预测", "reorder_window": "乱序窗口",
+    "compute_scaling": "计算扩展", "branch_structure": "分支结构",
     "os_overhead": "操作系统开销",
 }
 METRIC_ZH = {
@@ -53,6 +60,12 @@ METRIC_ZH = {
     "stride_payload_bandwidth": "固定步长有效载荷带宽",
     "effective_load_latency": "有效加载延迟",
     "random_load_rate": "随机加载速率",
+    "random_load_latency_under_load": "带载随机加载延迟",
+    "concurrent_read_bandwidth": "并发读取带宽",
+    "store_load_latency": "Store/load 对延迟",
+    "store_load_counter_ticks": "Store/load 对计数器 tick",
+    "code_delivery_bandwidth": "代码输送吞吐",
+    "instruction_rate": "指令执行速率",
     "cacheline_handoff_latency": "缓存行核间传递延迟",
     "atomic_update_rate": "原子更新速率",
     "load_latency": "加载延迟",
@@ -68,6 +81,16 @@ METRIC_ZH = {
     "miss_rate": "分支误预测率",
     "cold_load_overlap_penalty": "冷加载重叠损失",
     "rob_capacity_proxy": "ROB/乱序窗口容量代理值",
+    "integer_add_throughput": "整数加法聚合吞吐",
+    "btb_branch_latency": "BTB 直接跳转耗时",
+    "btb_counter_ticks": "BTB 直接跳转计数器 tick",
+    "btb_miss_rate": "BTB 压力下分支未命中率",
+    "history_period_latency": "方向历史周期分支耗时",
+    "history_period_miss_rate": "方向历史周期未命中率",
+    "return_stack_latency": "返回地址栈压力下返回耗时",
+    "return_stack_miss_rate": "返回地址栈压力下分支未命中率",
+    "indirect_call_latency": "间接调用目标切换耗时",
+    "indirect_call_miss_rate": "间接调用目标未命中率",
     "getpid_syscall": "getpid 系统调用",
     "anonymous_page_first_touch": "匿名页首次触碰",
     "minor_faults": "次缺页次数",
@@ -81,6 +104,7 @@ CATEGORY_ZH = {
 KIND_ZH = {
     "inventory": "系统清点", "measured": "直接测量", "inferred": "推断",
     "measured with perf": "使用 perf 测量", "inferred on x86": "x86 平台推断",
+    "measured proxy": "直接测量的代理曲线",
 }
 CACHE_TYPE_ZH = {"Data": "数据", "Instruction": "指令", "Unified": "统一"}
 METHOD_ZH = {
@@ -95,6 +119,27 @@ METHOD_ZH = {
     "requested 8-byte payload only; cache-line traffic excluded": "只统计请求的 8 字节有效载荷；不含缓存行流量",
     "independent random dependent-load chains": "多条独立的随机依赖加载链",
     "interleaved independent random dependent-load chains": "交错执行多条独立随机依赖加载链",
+    "same pointer chase with MADV_NOHUGEPAGE versus MADV_HUGEPAGE": "同一指针追逐工作集对比 MADV_NOHUGEPAGE 与 MADV_HUGEPAGE",
+    "dependent pointer chase while pinned cores generate streaming read traffic": "固定核心生成流式读取压力时执行依赖指针追逐",
+    "payload generated concurrently with the dependent-load latency probe": "与依赖加载延迟探针并发产生的读取有效载荷",
+    "dependent store followed by overlapping load": "依赖 store 后紧跟存在覆盖关系的 load",
+    "platform counter ticks per dependent store/load pair": "每个依赖 store/load 对的平台计数器 tick",
+    "W^X generated NOP body scanned repeatedly": "以 W^X 方式生成并重复扫描 NOP 指令体",
+    "W^X generated A64 NOP body scanned repeatedly": "以 W^X 方式生成并重复扫描 A64 NOP 指令体",
+    "known generated NOP count divided by wall time": "已知生成 NOP 数除以墙钟时间",
+    "known generated A64 NOP count divided by wall time": "已知生成 A64 NOP 数除以墙钟时间",
+    "perf retired instructions / core cycles for generated code": "生成代码的 perf 退休指令数除以核心周期",
+    "parallel pinned independent integer-add chains": "固定线程并行执行相互独立的整数加法链",
+    "median perf core cycles per wall second across active workers": "活动工作线程的 perf 核心周期/墙钟时间中位数",
+    "generated taken direct branches with independently varied footprint": "独立改变代码足迹的已跳转直接分支序列",
+    "platform counter ticks per generated taken branch": "每条生成的已跳转直接分支的平台计数器 tick",
+    "generic perf branch misses during BTB footprint sweep": "BTB 足迹扫描期间的通用 perf 分支未命中",
+    "scalar conditional branch over a repeating pseudo-random direction period": "重复伪随机方向周期上的标量条件分支",
+    "generic perf branch misses during history-period sweep": "方向历史周期扫描期间的通用 perf 分支未命中",
+    "generated nested calls with a unique return address at each depth": "每层具有唯一返回地址的生成式嵌套调用",
+    "generic perf branch misses during nested call/return chain": "嵌套调用/返回链期间的通用 perf 分支未命中",
+    "one indirect call site visits a shuffled set of generated return targets": "一个间接调用点按打乱顺序访问生成的返回目标集合",
+    "generic perf branch misses during indirect target sweep": "间接目标扫描期间的通用 perf 分支未命中",
     "release/acquire cache-line ping-pong": "release/acquire 缓存行乒乓",
     "two independent atomics at varying byte separation": "两个独立原子变量使用不同字节间距",
     "NUMA-placed random pointer chase": "在指定 NUMA 节点放置页面后执行随机指针追逐",
@@ -122,6 +167,13 @@ def _value_zh(key: str, value: Any) -> str:
     mappings = {
         "operation": OPERATION_ZH, "relation": RELATION_ZH,
         "pattern": PATTERN_ZH, "kernel": KERNEL_ZH,
+        "policy": {"base-page-advised": "基础页建议", "thp-advised": "透明大页建议"},
+        "scope": {"physical-cores": "物理核心", "smt-siblings": "SMT 同核线程"},
+        "branch_type": {"unconditional": "无条件跳转", "conditional-taken": "始终跳转条件分支"},
+        "case": {
+            "exact-8-to-8": "同址 8→8", "partial-4-to-8": "部分覆盖 4→8",
+            "overlap-offset-1": "错位重叠 +1", "split-cache-line": "跨缓存行",
+        },
         "matrix_scope": {
             "physical-core": "物理核心矩阵", "logical-cpu": "逻辑 CPU 矩阵",
             "representative": "代表性采样",
@@ -214,7 +266,7 @@ def _line_chart(
         try:
             x = float(x_value(item))
             y = float(item["value"])
-            if x > 0 and math.isfinite(x) and math.isfinite(y):
+            if (x > 0 if log_x else x >= 0) and math.isfinite(x) and math.isfinite(y):
                 grouped[series_value(item)].append((x, y, item))
         except (KeyError, TypeError, ValueError):
             continue
@@ -440,11 +492,12 @@ def _coverage(report: dict[str, Any]) -> str:
     groups = {item.get("group") for item in report.get("observations", [])}
     mapping = {
         "identity": True, "topology": True, "cache": bool(_obs(report, "cache_latency", "random_load_latency")),
-        "latency": bool(groups & {"cache_latency", "tlb_latency", "numa"}),
-        "bandwidth": bool(groups & {"memory_bandwidth", "numa"}),
-        "memory": bool(groups & {"memory_access", "memory_parallelism"}),
+        "latency": bool(groups & {"cache_latency", "tlb_latency", "page_policy", "loaded_memory_latency", "numa"}),
+        "bandwidth": bool(groups & {"memory_bandwidth", "cache_bandwidth", "instruction_fetch", "numa"}),
+        "memory": bool(groups & {"memory_access", "memory_parallelism", "store_forwarding"}),
         "coherence": bool(groups & {"core_latency", "coherence"}),
-        "core": "pipeline" in groups, "branch": "branch" in groups,
+        "core": bool(groups & {"pipeline", "compute_scaling", "reorder_window"}),
+        "branch": bool(groups & {"branch", "branch_structure"}),
         "os": True, "environment": True,
     }
     rows = []
@@ -509,6 +562,45 @@ def render_report(report: dict[str, Any]) -> str:
         lambda x: str(int(x)), "Gaccess/s",
         "多条相互独立、链内依赖的随机访问链，用于测量单核可维持的并发缺失数下界。", True,
     )
+    page_policy_rows = [
+        (_value_zh("policy", item["labels"].get("policy", "unknown")), item["value"], item["unit"])
+        for item in _obs(report, "page_policy", "random_load_latency")
+    ]
+    page_policy_chart = _bar_chart(
+        "基础页与透明大页策略对比", page_policy_rows,
+        "madvise 只是建议；每个原始点的 anon_huge_bytes 标签给出该映射实际使用的匿名大页字节数。",
+    )
+    loaded_latency_curve = _line_chart(
+        "带宽压力下的随机内存延迟",
+        _obs(report, "loaded_memory_latency", "random_load_latency_under_load"),
+        lambda item: float(item["labels"].get("measured_load_gbps", 0)),
+        lambda _: "依赖加载延迟", lambda x: f"{x:.1f}", "ns/access",
+        "横轴为并发读取线程实际产生的有效载荷 GB/s；零点是不施加带宽压力的基线。",
+    )
+    loaded_bandwidth_curve = _line_chart(
+        "延迟探针并发负载强度",
+        _obs(report, "loaded_memory_latency", "concurrent_read_bandwidth"),
+        lambda item: int(item["labels"].get("load_threads", 0)), lambda _: "并发读取",
+        lambda x: str(int(x)), "GB/s",
+        "该曲线记录带载延迟实验每个压力线程数下真正达到的有效读取带宽。",
+    )
+    forwarding_rows = [
+        (_value_zh("case", item["labels"].get("case", "unknown")), item["value"], item["unit"])
+        for item in _obs(report, "store_forwarding", "store_load_latency")
+    ]
+    forwarding_chart = _bar_chart(
+        "Store-to-load forwarding 对齐代价", forwarding_rows,
+        "同址同宽是基线；部分覆盖、错位重叠和跨缓存行可暴露转发失败或重放路径。",
+    )
+    instruction_fetch_curve = _line_chart(
+        "指令侧代码输送吞吐与足迹",
+        _obs(report, "instruction_fetch", "code_delivery_bandwidth"),
+        lambda item: int(item["labels"]["working_set_bytes"]),
+        lambda item: f"{item['labels'].get('instruction_bytes')} 字节 NOP",
+        lambda x: _human_bytes(x), "GB/s",
+        "W^X 生成代码从 4 KiB 扩展到 MiB 级；曲线综合反映 L1I、iTLB、下级缓存和前端输送，不能直接等同于指令缓存容量。",
+        True,
+    )
     false_sharing_curve = _line_chart(
         "伪共享边界",
         _obs(report, "coherence", "atomic_update_rate"),
@@ -550,6 +642,52 @@ def render_report(report: dict[str, Any]) -> str:
     core_chart = _bar_chart(
         "核间缓存行传递延迟（按拓扑分类）", core_rows,
         "release/acquire 乒乓往返时间除以二。standard 覆盖全部物理核心对，deep 覆盖全部可见逻辑 CPU 对。",
+    )
+    compute_scaling_curve = _line_chart(
+        "整数微内核的多核与 SMT 吞吐扩展",
+        _obs(report, "compute_scaling", "integer_add_throughput"),
+        lambda item: int(item["labels"].get("threads", 1)),
+        lambda item: _value_zh("scope", item["labels"].get("scope", "unknown")),
+        lambda x: str(int(x)), "Gop/s",
+        "物理核心曲线用于观察全核扩展；SMT 点比较同一物理核心上一个与两个硬件线程的资源共享效果。",
+    )
+    btb_items = _obs(report, "branch_structure", "btb_branch_latency")
+    btb_unconditional_curve = _line_chart(
+        "BTB 无条件跳转足迹压力",
+        [item for item in btb_items if item["labels"].get("branch_type") == "unconditional"],
+        lambda item: int(item["labels"]["branch_count"]),
+        lambda item: f"间距 {item['labels'].get('spacing_bytes')}B",
+        lambda x: str(int(x)), "ns/branch",
+        "无条件已跳转直接分支的数量与地址间距独立变化；耗时台阶只作为多级 BTB/前端结构容量代理。", True,
+    )
+    btb_conditional_curve = _line_chart(
+        "BTB 始终跳转条件分支足迹压力",
+        [item for item in btb_items if item["labels"].get("branch_type") == "conditional-taken"],
+        lambda item: int(item["labels"]["branch_count"]),
+        lambda item: f"间距 {item['labels'].get('spacing_bytes')}B",
+        lambda x: str(int(x)), "ns/branch",
+        "条件恒为真的直接分支使用相同数量和间距扫描，便于比较条件/无条件分支的 BTB 路径。", True,
+    )
+    history_curve = _line_chart(
+        "方向预测器历史周期压力",
+        _obs(report, "branch_structure", "history_period_latency"),
+        lambda item: int(item["labels"]["history_period"]), lambda _: "重复伪随机周期",
+        lambda x: str(int(x)), "ns/branch",
+        "周期越长，预测器需要记住的方向序列越复杂；曲线受到分支地址、别名和预测算法共同影响。", True,
+    )
+    return_stack_curve = _line_chart(
+        "返回地址栈（RAS）深度压力",
+        _obs(report, "branch_structure", "return_stack_latency"),
+        lambda item: int(item["labels"]["depth"]), lambda _: "唯一返回地址嵌套调用",
+        lambda x: str(int(x)), "ns/return",
+        "每一层调用拥有不同返回地址；拐点是 RAS/返回预测路径的低置信容量代理。", True,
+    )
+    indirect_curve = _line_chart(
+        "间接分支目标数量压力",
+        _obs(report, "branch_structure", "indirect_call_latency"),
+        lambda item: int(item["labels"]["target_count"]), lambda _: "单一间接调用点",
+        lambda x: str(int(x)), "ns/call",
+        "一个间接调用点按打乱顺序切换目标；拐点综合反映间接目标预测器、BTB 和代码足迹。", True,
     )
     core_matrix = ""
     core_latency_items = _obs(report, "core_latency", "cacheline_handoff_latency")
@@ -672,13 +810,13 @@ section{{padding:72px 0;border-bottom:1px solid var(--line);scroll-margin-top:54
   {_topology_visual(system)}
 </section>
 <section id="memory"><div class="section-head"><div><div class="section-kicker">03 / 存储层级</div><h2>缓存与<br>内存系统</h2></div><p class="section-intro">依赖加载用于暴露延迟层级，并行数据流用于测量从单核到整个可访问系统的可持续有效载荷。每个原始数据点均保留工作集、线程数和亲和性信息。</p></div>
-  <div class="chart-grid"><div class="wide">{cache_curve}</div>{tlb_curve}{false_sharing_curve}<div class="wide">{cache_bandwidth_curve}</div>{stride_curve}{mlp_curve}<div class="wide">{bandwidth_curve}</div></div>
+  <div class="chart-grid"><div class="wide">{cache_curve}</div>{tlb_curve}{false_sharing_curve}<div class="wide">{cache_bandwidth_curve}</div>{stride_curve}{mlp_curve}{page_policy_chart}{forwarding_chart}{loaded_latency_curve}{loaded_bandwidth_curve}<div class="wide">{instruction_fetch_curve}</div><div class="wide">{bandwidth_curve}</div></div>
 </section>
 <section id="numa"><div class="section-head"><div><div class="section-kicker">04 / 片间互联</div><h2>NUMA 与<br>互联</h2></div><p class="section-intro">页面被绑定到各内存节点；若绑定权限不足，则由固定线程首次触碰完成放置。随后从每个 CPU 节点访问这些页面。虚拟化、容器或 mbind 权限不足会降低内存放置置信度。</p></div>
   <div class="chart-grid">{numa_latency}{numa_bandwidth}</div>
 </section>
-<section id="core"><div class="section-head"><div><div class="section-kicker">05 / 微架构</div><h2>核心<br>执行引擎</h2></div><p class="section-intro">架构专用标量汇编分别测试前端流量、依赖延迟和独立链吞吐。IPC 由 perf 的退休指令数/核心周期计算；若内核禁止访问硬件计数器，依赖计数器的推断将明确显示为不可用。</p></div>
-  <div class="chart-grid">{pipeline_chart}{branch_chart}{core_chart}{rob_curve}{core_matrix}</div>
+<section id="core"><div class="section-head"><div><div class="section-kicker">05 / 微架构</div><h2>核心<br>执行引擎</h2></div><p class="section-intro">架构专用标量汇编分别测试前端流量、整数与 FP64 依赖延迟、独立链吞吐及多核/SMT 扩展。生成式分支序列提供 BTB、历史、返回地址栈和间接目标的压力曲线；所有结构容量只作为经验代理。</p></div>
+  <div class="chart-grid">{pipeline_chart}{branch_chart}<div class="wide">{compute_scaling_curve}</div>{btb_unconditional_curve}{btb_conditional_curve}{history_curve}{return_stack_curve}{indirect_curve}{core_chart}{rob_curve}{core_matrix}</div>
 </section>
 <section id="inventory"><div class="section-head"><div><div class="section-kicker">06 / 静态证据</div><h2>硬件<br>清点</h2></div><p class="section-intro">sysfs 与 procfs 是操作系统可见的平台证据。容量与拓扑通常较可靠，但固件缺陷、cgroup 亲和性限制和虚拟化仍可能改变可见范围。</p></div>
   {_inventory_tables(system)}

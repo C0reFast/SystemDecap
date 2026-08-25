@@ -75,16 +75,21 @@ lscpu.txt          便于人工复核的 lscpu 快照
 - 平台身份：vendor/model/family/stepping/microcode、ISA flags、虚拟化、DMI/BIOS、内核。
 - 拓扑：可用/在线逻辑 CPU、物理核、SMT、cluster/die/socket、NUMA node、affinity/cgroup 可见范围。
 - Cache：L1I/L1D/L2/L3 容量、共享域、line、ways、sets，以及随机依赖加载的经验台阶。
-- TLB：基础页 one-access-per-page sweep、容量拐点和 page-walk 代价曲线。
+- TLB/页面：基础页 one-access-per-page sweep、容量拐点、page-walk 代价，以及 MADV_NOHUGEPAGE/THP 建议策略对比和实际匿名大页驻留量。
 - 内存：单核与聚合 read/write/copy/triad payload，随物理核数的缩放和饱和点。
+- 带载延迟：固定核心执行随机依赖加载，同时由其他物理核心逐级施加流式读取压力。
 - NUMA/fabric：CPU node × memory node 的随机延迟和聚合读带宽矩阵；非对角线作为互联有效 payload。
 - 一致性：SMT、同 NUMA、跨 NUMA、跨 socket 的 cache-line 单向 handoff；false-sharing 间距曲线。
-- 核心：NOP 前端流、1/4/8 独立整数加法链、整数乘法依赖/并行链、retired IPC、ops/cycle。
-- 分支：always-taken、alternating、random 模式的 ns/branch、miss rate 和 IPC。
+- 核心：NOP 前端流、1/4/8 独立整数加法链、整数与 FP64 加法/乘法依赖和并行链、retired IPC、ops/cycle，以及物理核心/SMT 吞吐与频率扩展。
+- 指令侧：W^X 生成式 x86 1/4/8 字节 NOP 或 A64 4 字节 NOP，输出代码足迹对应的输送吞吐曲线。
+- 分支：always-taken、alternating、random 模式，以及 BTB 数量/间距、方向历史周期、返回地址栈深度和间接目标数量压力曲线。
+- 存储转发：同址同宽、部分覆盖、错位重叠和跨缓存行 store/load 对延迟。
 - 乱序窗口：x86/C86 两个 cold miss 的 overlap knee，输出 ROB/调度窗口的低置信动态 µop 区间；ARM64 当前明确标记 unavailable。
 - 运行环境：时钟源与读取开销、频率 policy/governor、THP/页大小、perf policy、温区、漏洞缓解、块设备和网络接口。
 
-完整清单、方法和可扩展项见 [docs/METRICS.md](docs/METRICS.md)。
+完整清单、方法和可扩展项见 [docs/METRICS.md](docs/METRICS.md)。与
+`clamchowder/Microbenchmarks` 固定提交的逐模块审计见
+[docs/MICROBENCHMARKS-COVERAGE.md](docs/MICROBENCHMARKS-COVERAGE.md)。
 
 ## 如何获得可复现结果
 
@@ -124,6 +129,8 @@ ARM64 应在 ARM64 目标机上原生构建，以免交叉编译的 libc/sysroot
 - “互联带宽”是 remote memory 有效读 payload，不包含协议开销，不能直接等价为链路 GT/s 或位宽。
 - NOP IPC 是前端/退休综合下界，可能由 µop cache、NOP 特殊处理或 retire width 主导。
 - adds/cycle 是可用整数执行吞吐下界，不是硬件端口数量的直接读数。
+- BTB、历史、RAS、间接目标、ROB、scheduler/LQ/SQ 等曲线拐点是经验代理，不能直接当成硬件条目数。
+- 指令侧 GB/s 按生成代码体字节数统计，用于比较代码足迹层级，不是外部总线的物理字节流量。
 - ROB proxy 同时受 ROB、scheduler、load queue、分支循环 µop 和内存级并行影响，必须按低置信区间理解。
 - 虚拟机、容器、SMT 邻居、迁移页、自动 NUMA balancing、频率变化和热节流均可能改变结果。
 

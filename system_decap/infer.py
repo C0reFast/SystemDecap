@@ -78,10 +78,32 @@ def _knees(curve: list[dict[str, Any]], x_label: str, ratio: float = 1.45) -> li
     return result
 
 
+def _pressure_knee(
+    curve: list[dict[str, Any]], x_label: str, ratio: float = 1.30
+) -> dict[str, float] | None:
+    ordered = sorted(curve, key=lambda item: int(item.get("labels", {}).get(x_label, 0)))
+    if len(ordered) < 3:
+        return None
+    baseline_items = ordered[: min(3, len(ordered))]
+    baseline = statistics.median(float(item["value"]) for item in baseline_items)
+    for item in ordered[len(baseline_items):]:
+        value = float(item["value"])
+        if baseline > 0 and value > baseline * ratio:
+            return {
+                "x": int(item.get("labels", {}).get(x_label, 0)),
+                "baseline": baseline,
+                "value": value,
+                "ratio": value / baseline,
+            }
+    return None
+
+
 def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     observations = native.get("observations", [])
     estimates: list[dict[str, Any]] = []
-    diagnostics: dict[str, Any] = {"cache_knees": [], "tlb_knees": []}
+    diagnostics: dict[str, Any] = {
+        "cache_knees": [], "tlb_knees": [], "branch_structure_knees": {}
+    }
 
     topology = system.get("topology", {})
     for key, name, unit in [
@@ -150,6 +172,76 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
             f"逐页单次访问扫描中的延迟跳升为 {first['ratio']:.2f}×",
             "这是容量拐点，不能直接视为某一级 TLB 的精确条目数。", "tlb",
         ))
+
+    page_policy = _matching(observations, "page_policy", "random_load_latency")
+    page_by_name = {item["labels"].get("policy"): item for item in page_policy}
+    base_page = page_by_name.get("base-page-advised")
+    thp_page = page_by_name.get("thp-advised")
+    page_policy_quality = (
+        "low" if base_page and thp_page
+        and "low" in {base_page.get("confidence"), thp_page.get("confidence")}
+        else "medium" if base_page and thp_page else "unavailable"
+    )
+    estimates.append(_estimate(
+        "memory.thp_latency_ratio", "THP 建议相对基础页建议的随机延迟",
+        thp_page["value"] / base_page["value"] if thp_page and base_page and base_page["value"] else None,
+        "×", page_policy_quality,
+        "同一工作集 MADV_HUGEPAGE 延迟 / MADV_NOHUGEPAGE 延迟",
+        "madvise 只是策略建议；报告同时保留 AnonHugePages 实际驻留字节数。", "memory",
+    ))
+
+    loaded_latency = sorted(
+        _matching(observations, "loaded_memory_latency", "random_load_latency_under_load"),
+        key=lambda item: int(item["labels"].get("load_threads", 0)),
+    )
+    unloaded = next((item for item in loaded_latency if item["labels"].get("load_threads") == "0"), None)
+    worst_loaded = max(loaded_latency, key=lambda item: item["value"], default=None)
+    estimates.append(_estimate(
+        "memory.loaded_latency_slowdown", "带宽压力下的最大内存延迟放大",
+        worst_loaded["value"] / unloaded["value"] if worst_loaded and unloaded and unloaded["value"] else None,
+        "×", "medium" if worst_loaded and unloaded else "unavailable",
+        (f"{worst_loaded['labels'].get('load_threads')} 个加载线程下的最大值 / 无加载线程基线"
+         if worst_loaded and unloaded else "未测量"),
+        "并发线程同时消耗内存控制器、缓存和片上互联资源。", "memory",
+    ))
+
+    forwarding = _matching(observations, "store_forwarding", "store_load_latency")
+    forwarding_by_case = {item["labels"].get("case"): item for item in forwarding}
+    exact_forward = forwarding_by_case.get("exact-8-to-8")
+    for case, name in [
+        ("partial-4-to-8", "部分覆盖"),
+        ("overlap-offset-1", "错位重叠"),
+        ("split-cache-line", "跨缓存行"),
+    ]:
+        item = forwarding_by_case.get(case)
+        estimates.append(_estimate(
+            f"memory.store_forwarding_penalty.{case}", f"Store forwarding {name}额外代价",
+            item["value"] - exact_forward["value"] if item and exact_forward else None,
+            "ns/pair", "medium" if item and exact_forward else "unavailable",
+            "对应 store/load 对耗时减去同地址 8→8 基线",
+            "包含循环、地址生成和平台计时噪声；用于相对比较。", "memory",
+        ))
+
+    instruction_fetch = [
+        item for item in _matching(observations, "instruction_fetch", "code_delivery_bandwidth")
+        if item["labels"].get("instruction_bytes") == "4"
+    ]
+    instruction_fetch_knee = None
+    if instruction_fetch:
+        ordered_fetch = sorted(
+            instruction_fetch, key=lambda item: int(item["labels"].get("working_set_bytes", 0))
+        )
+        peak_prefix = max(float(item["value"]) for item in ordered_fetch[: min(3, len(ordered_fetch))])
+        instruction_fetch_knee = next((
+            int(item["labels"]["working_set_bytes"]) for item in ordered_fetch[3:]
+            if float(item["value"]) < peak_prefix * 0.70
+        ), None)
+    estimates.append(_estimate(
+        "core.instruction_footprint_knee", "指令输送吞吐首个明显下降足迹",
+        instruction_fetch_knee, "bytes", "low" if instruction_fetch_knee else "unavailable",
+        "4 字节 NOP 编码吞吐首次低于小工作集峰值 70% 的代码足迹",
+        "这是 L1I/iTLB/更低层取指路径的综合拐点，不是精确 L1I 容量。", "core",
+    ))
 
     bandwidth = _matching(observations, "memory_bandwidth", "stream_bandwidth")
     read_bandwidth = [item for item in bandwidth if item["labels"].get("operation") == "read"]
@@ -322,11 +414,61 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
         mul_parallel[0]["value"] if mul_parallel else None, "multiplies/cycle",
         "medium" if mul_parallel else "unavailable", "四条独立标量乘法链", category="core",
     ))
+    fp_specs = [
+        ("fp64_add_dependency", "core.fp64_add_latency", "FP64 加法依赖延迟", "cycles/op"),
+        ("fp64_add_parallel4", "core.fp64_add_throughput", "FP64 加法并行吞吐", "operations/cycle"),
+        ("fp64_mul_dependency", "core.fp64_multiply_latency", "FP64 乘法依赖延迟", "cycles/op"),
+        ("fp64_mul_parallel4", "core.fp64_multiply_throughput", "FP64 乘法并行吞吐", "operations/cycle"),
+    ]
+    for kernel, key, name, unit in fp_specs:
+        metric = "cycles_per_operation" if kernel.endswith("dependency") else "operations_per_cycle"
+        items = [
+            item for item in _matching(observations, "pipeline", metric)
+            if item["labels"].get("kernel") == kernel
+        ]
+        estimates.append(_estimate(
+            key, name, items[0]["value"] if items else None, unit,
+            "medium" if items else "unavailable", f"标量微内核 {kernel}",
+            "这是标量 FP64 路径的软件可见值，不代表 SIMD/矩阵单元峰值。", "core",
+        ))
     frequencies = _matching(observations, "pipeline", "effective_core_frequency")
     estimates.append(_estimate(
         "core.effective_frequency", "微基准期间有效核心频率",
         _median(item["value"] for item in frequencies), "GHz", "medium" if frequencies else "unavailable",
         "各标量微内核的 perf 核心周期 / 墙钟时间中位数", category="core",
+    ))
+
+    compute_scaling = [
+        item for item in _matching(observations, "compute_scaling", "integer_add_throughput")
+        if item["labels"].get("scope") == "physical-cores"
+    ]
+    peak_compute = max(compute_scaling, key=lambda item: item["value"], default=None)
+    one_compute = next((item for item in compute_scaling if item["labels"].get("threads") == "1"), None)
+    estimates.append(_estimate(
+        "core.aggregate_integer_add_throughput", "全核整数加法实测峰值",
+        peak_compute["value"] if peak_compute else None, "Gop/s",
+        "medium" if peak_compute else "unavailable",
+        (f"固定 {peak_compute['labels'].get('threads')} 个物理核心的独立加法链"
+         if peak_compute else "未测量"),
+        "用于频率和扩展性比较，不是所有整数指令的通用峰值。", "core",
+    ))
+    if peak_compute and one_compute:
+        threads = int(peak_compute["labels"].get("threads", 1))
+        estimates.append(_estimate(
+            "core.compute_scaling_efficiency", "全核整数吞吐扩展效率",
+            peak_compute["value"] / max(one_compute["value"] * threads, 1e-12) * 100.0,
+            "%", "medium", "峰值吞吐 /（单核吞吐 × 峰值线程数）",
+            "受全核频率、热功耗限制和后台负载影响。", "core",
+        ))
+    smt_compute = next((
+        item for item in _matching(observations, "compute_scaling", "integer_add_throughput")
+        if item["labels"].get("scope") == "smt-siblings"
+    ), None)
+    estimates.append(_estimate(
+        "core.smt_integer_add_gain", "同一物理核启用两个 SMT 线程的吞吐增益",
+        smt_compute["value"] / one_compute["value"] if smt_compute and one_compute else None,
+        "×", "medium" if smt_compute and one_compute else "unavailable",
+        "SMT sibling 双线程吞吐 / 单物理核心单线程吞吐", category="core",
     ))
 
     rob = _matching(observations, "reorder_window", "rob_capacity_proxy")
@@ -353,6 +495,42 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
         "branch.random_miss_rate", "随机分支误预测率", branch_misses.get("random"), "%",
         "high" if "random" in branch_misses else "unavailable", "perf 分支未命中数 / 分支指令数", category="branch",
     ))
+
+    branch_proxy_specs = [
+        (
+            "btb", "btb_branch_latency", "branch_count", "branch.btb_footprint_knee",
+            "BTB 直接跳转足迹拐点", "entries", 1.25,
+            lambda item: item["labels"].get("spacing_bytes") == "16"
+            and item["labels"].get("branch_type") == "unconditional",
+        ),
+        (
+            "history", "history_period_latency", "history_period", "branch.history_period_knee",
+            "方向预测历史周期拐点", "branches", 1.30, lambda item: True,
+        ),
+        (
+            "return_stack", "return_stack_latency", "depth", "branch.return_stack_depth_proxy",
+            "返回地址栈深度拐点", "nested calls", 1.20, lambda item: True,
+        ),
+        (
+            "indirect", "indirect_call_latency", "target_count", "branch.indirect_target_knee",
+            "间接分支目标数量拐点", "targets", 1.30, lambda item: True,
+        ),
+    ]
+    for diagnostic_key, metric, x_label, key, name, unit, ratio, predicate in branch_proxy_specs:
+        curve = [
+            item for item in _matching(observations, "branch_structure", metric)
+            if predicate(item)
+        ]
+        knee = _pressure_knee(curve, x_label, ratio)
+        diagnostics["branch_structure_knees"][diagnostic_key] = knee
+        estimates.append(_estimate(
+            key, name, knee["x"] if knee else None, unit,
+            "low" if knee else "unavailable",
+            (f"压力曲线相对前三个小足迹点中位数上升 {knee['ratio']:.2f}×"
+             if knee else "未找到满足阈值的稳定拐点"),
+            "该数值是多级预测器、代码布局、计时和通用 perf 事件共同作用的经验代理，不是硬件条目数真值。",
+            "branch",
+        ))
 
     mlp_rates = _matching(observations, "memory_parallelism", "random_load_rate")
     one_chain_rate = next((item["value"] for item in mlp_rates if item["labels"].get("chains") == "1"), None)

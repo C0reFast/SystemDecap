@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cctype>
@@ -484,16 +485,27 @@ void emit_json(const Options &options, const std::vector<Observation> &observati
   std::cout << "]\n}\n";
 }
 
+enum class HugePageAdvice { PreferHuge, AvoidHuge, Default };
+
 class MappedBuffer {
  public:
-  explicit MappedBuffer(std::size_t bytes) : bytes_(bytes) {
+  explicit MappedBuffer(std::size_t bytes,
+                        HugePageAdvice advice = HugePageAdvice::PreferHuge)
+      : bytes_(bytes) {
     data_ = mmap(nullptr, bytes_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (data_ == MAP_FAILED) {
       data_ = nullptr;
       throw std::runtime_error(std::string("mmap failed: ") + std::strerror(errno));
     }
 #ifdef MADV_HUGEPAGE
-    madvise(data_, bytes_, MADV_HUGEPAGE);
+    if (advice == HugePageAdvice::PreferHuge) {
+      madvise(data_, bytes_, MADV_HUGEPAGE);
+    }
+#endif
+#ifdef MADV_NOHUGEPAGE
+    if (advice == HugePageAdvice::AvoidHuge) {
+      madvise(data_, bytes_, MADV_NOHUGEPAGE);
+    }
 #endif
   }
   MappedBuffer(const MappedBuffer &) = delete;
@@ -507,6 +519,45 @@ class MappedBuffer {
   const std::byte *bytes() const { return static_cast<const std::byte *>(data_); }
   template <typename T> T *as() { return static_cast<T *>(data_); }
   std::size_t size() const { return bytes_; }
+
+ private:
+  void *data_ = nullptr;
+  std::size_t bytes_ = 0;
+};
+
+class ExecutableBuffer {
+ public:
+  explicit ExecutableBuffer(std::size_t bytes) : bytes_(bytes) {
+    data_ = mmap(nullptr, bytes_, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (data_ == MAP_FAILED) {
+      data_ = nullptr;
+      throw std::runtime_error(std::string("executable mmap failed: ") +
+                               std::strerror(errno));
+    }
+  }
+  ExecutableBuffer(const ExecutableBuffer &) = delete;
+  ExecutableBuffer &operator=(const ExecutableBuffer &) = delete;
+  ~ExecutableBuffer() {
+    if (data_ != nullptr) munmap(data_, bytes_);
+  }
+
+  std::byte *bytes() { return static_cast<std::byte *>(data_); }
+  std::size_t size() const { return bytes_; }
+
+  void seal() {
+    auto *begin = static_cast<char *>(data_);
+    __builtin___clear_cache(begin, begin + bytes_);
+    if (mprotect(data_, bytes_, PROT_READ | PROT_EXEC) != 0) {
+      throw std::runtime_error(std::string("mprotect RX failed: ") +
+                               std::strerror(errno));
+    }
+  }
+
+  template <typename Function>
+  Function function_at(std::size_t offset = 0) const {
+    return reinterpret_cast<Function>(static_cast<std::byte *>(data_) + offset);
+  }
 
  private:
   void *data_ = nullptr;
@@ -1003,6 +1054,259 @@ void benchmark_memory_parallelism(const Options &options, int cpu,
   }
 }
 
+std::size_t mapping_anon_huge_bytes(const void *address) {
+  std::ifstream smaps("/proc/self/smaps");
+  if (!smaps) return 0;
+  const auto target = reinterpret_cast<std::uintptr_t>(address);
+  bool selected = false;
+  std::string line;
+  while (std::getline(smaps, line)) {
+    const auto dash = line.find('-');
+    const auto space = line.find(' ');
+    if (dash != std::string::npos && space != std::string::npos && dash < space) {
+      try {
+        const auto begin = static_cast<std::uintptr_t>(std::stoull(line.substr(0, dash), nullptr, 16));
+        const auto end = static_cast<std::uintptr_t>(
+            std::stoull(line.substr(dash + 1, space - dash - 1), nullptr, 16));
+        selected = target >= begin && target < end;
+      } catch (...) {
+        selected = false;
+      }
+      continue;
+    }
+    if (selected && line.rfind("AnonHugePages:", 0) == 0) {
+      std::istringstream input(line.substr(std::string("AnonHugePages:").size()));
+      std::size_t kib = 0;
+      input >> kib;
+      return kib * 1024;
+    }
+  }
+  return 0;
+}
+
+void benchmark_page_policy(const Options &options, int cpu,
+                           std::vector<Observation> &observations,
+                           std::vector<std::string> &warnings) {
+  if (options.profile == "smoke") return;
+  pin_to_cpu(cpu);
+  const std::size_t profile_floor = options.profile == "quick" ? 32U * 1024U * 1024U
+      : options.profile == "deep" ? 256U * 1024U * 1024U
+                                  : 128U * 1024U * 1024U;
+  const std::size_t profile_cap = options.profile == "deep" ? 512ULL * 1024ULL * 1024ULL
+                                                            : 256ULL * 1024ULL * 1024ULL;
+  const std::size_t bytes = std::min(profile_cap,
+      std::max(profile_floor, last_level_cache_bytes(cpu) * 2));
+  const std::size_t iterations = options.profile == "quick" ? 300000 : 1000000;
+  for (const auto &[name, advice] :
+       {std::pair{"base-page-advised", HugePageAdvice::AvoidHuge},
+        std::pair{"thp-advised", HugePageAdvice::PreferHuge}}) {
+    try {
+      MappedBuffer buffer(bytes, advice);
+      std::mt19937 random(options.seed ^ (advice == HugePageAdvice::PreferHuge ? 0x48554745U
+                                                                              : 0x42415345U));
+      build_random_chain(buffer.bytes(), bytes, 64, random);
+      (void)chase_chain(buffer.bytes(), 10000);
+      std::vector<double> samples;
+      for (int sample = 0; sample < (options.profile == "quick" ? 2 : 3); ++sample) {
+        samples.push_back(chase_chain(buffer.bytes(), iterations));
+      }
+      const std::size_t huge_bytes = mapping_anon_huge_bytes(buffer.bytes());
+      add_observation(observations, "page_policy", "random_load_latency",
+                      median_double(std::move(samples)), "ns/access",
+                      advice == HugePageAdvice::PreferHuge && huge_bytes == 0 ? "low" : "medium",
+                      "same pointer chase with MADV_NOHUGEPAGE versus MADV_HUGEPAGE",
+                      {{"cpu", std::to_string(cpu)},
+                       {"policy", name},
+                       {"working_set_bytes", std::to_string(bytes)},
+                       {"anon_huge_bytes", std::to_string(huge_bytes)}});
+    } catch (const std::exception &error) {
+      warnings.push_back(std::string("页策略对比探针提前停止：") + error.what());
+      return;
+    }
+  }
+}
+
+void benchmark_loaded_memory_latency(const Options &options,
+                                     const std::vector<CpuInfo> &cpus,
+                                     std::vector<Observation> &observations,
+                                     std::vector<std::string> &warnings) {
+  if (options.profile == "smoke") return;
+  const auto physical = numa_balanced_physical_cpus(cpus);
+  const int latency_cpu = physical.front().cpu;
+  std::vector<int> load_cpus;
+  for (const auto &cpu : physical) {
+    if (cpu.cpu != latency_cpu) load_cpus.push_back(cpu.cpu);
+  }
+  const std::size_t max_load_threads = options.profile == "quick"
+      ? std::min<std::size_t>(load_cpus.size(), 4) : load_cpus.size();
+  std::vector<std::size_t> loads{0};
+  if (max_load_threads > 0) {
+    const auto nonzero = thread_counts(max_load_threads);
+    loads.insert(loads.end(), nonzero.begin(), nonzero.end());
+  }
+
+  const std::size_t floor = options.profile == "quick" ? 64U * 1024U * 1024U
+      : options.profile == "deep" ? 256U * 1024U * 1024U
+                                  : 128U * 1024U * 1024U;
+  const std::size_t cap = options.profile == "deep" ? 512ULL * 1024ULL * 1024ULL
+                                                    : 256ULL * 1024ULL * 1024ULL;
+  const std::size_t bytes = std::min(cap, std::max(floor, last_level_cache_bytes(latency_cpu) * 2));
+  const std::size_t latency_iterations = options.profile == "quick" ? 300000
+      : options.profile == "deep" ? 2000000
+                                  : 1000000;
+  try {
+    MappedBuffer latency_buffer(bytes);
+    MappedBuffer load_buffer(bytes);
+    std::mt19937 random(options.seed ^ 0x10ADED1U);
+    build_random_chain(latency_buffer.bytes(), latency_buffer.size(), 64, random);
+    auto *load_values = load_buffer.as<std::uint64_t>();
+    const std::size_t elements = load_buffer.size() / sizeof(std::uint64_t);
+    for (std::size_t index = 0; index < elements; ++index) load_values[index] = index + 1;
+
+    for (const std::size_t load_threads : loads) {
+      std::atomic<std::size_t> ready{0};
+      std::atomic<bool> go{false};
+      std::atomic<bool> stop{false};
+      std::vector<std::uint64_t> transferred(load_threads, 0);
+      std::vector<std::uint64_t> sums(load_threads, 0);
+      std::vector<std::thread> workers;
+      for (std::size_t worker = 0; worker < load_threads; ++worker) {
+        workers.emplace_back([&, worker] {
+          pin_to_cpu(load_cpus[worker]);
+          const std::size_t begin = elements * worker / load_threads;
+          const std::size_t end = elements * (worker + 1) / load_threads;
+          std::uint64_t local_sum = 0;
+          std::uint64_t local_bytes = 0;
+          ready.fetch_add(1, std::memory_order_release);
+          while (!go.load(std::memory_order_acquire)) cpu_relax();
+          while (!stop.load(std::memory_order_relaxed)) {
+            for (std::size_t index = begin; index < end; ++index) local_sum += load_values[index];
+            local_bytes += (end - begin) * sizeof(std::uint64_t);
+          }
+          transferred[worker] = local_bytes;
+          sums[worker] = local_sum;
+        });
+      }
+      while (ready.load(std::memory_order_acquire) != load_threads) std::this_thread::yield();
+      pin_to_cpu(latency_cpu);
+      (void)chase_chain(latency_buffer.bytes(), 10000);
+      const auto begin = Clock::now();
+      go.store(true, std::memory_order_release);
+      if (load_threads > 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      const double latency = chase_chain(latency_buffer.bytes(), latency_iterations);
+      stop.store(true, std::memory_order_release);
+      for (auto &worker : workers) worker.join();
+      const double elapsed = seconds_between(begin, Clock::now());
+      const auto total_bytes = std::accumulate(transferred.begin(), transferred.end(), std::uint64_t{0});
+      global_sink = global_sink ^ std::accumulate(sums.begin(), sums.end(), std::uint64_t{0});
+      const double bandwidth = static_cast<double>(total_bytes) / std::max(elapsed, 1e-12) / 1e9;
+      const Labels labels{{"latency_cpu", std::to_string(latency_cpu)},
+                          {"load_threads", std::to_string(load_threads)},
+                          {"working_set_bytes", std::to_string(bytes)},
+                          {"measured_load_gbps", std::to_string(bandwidth)}};
+      add_observation(observations, "loaded_memory_latency", "random_load_latency_under_load",
+                      latency, "ns/access", "medium",
+                      "dependent pointer chase while pinned cores generate streaming read traffic",
+                      labels);
+      add_observation(observations, "loaded_memory_latency", "concurrent_read_bandwidth",
+                      bandwidth, "GB/s", "medium",
+                      "payload generated concurrently with the dependent-load latency probe",
+                      labels);
+    }
+  } catch (const std::exception &error) {
+    warnings.push_back(std::string("带载内存延迟探针提前停止：") + error.what());
+  }
+}
+
+enum class StoreForwardCase { Exact64, Partial32To64, OverlapByOne, SplitLine };
+
+std::pair<double, double> store_forward_measurement(StoreForwardCase test_case,
+                                                     std::size_t iterations) {
+  alignas(128) std::array<std::byte, 256> storage{};
+  auto *base = storage.data() + (test_case == StoreForwardCase::SplitLine ? 60 : 64);
+  std::uint64_t value = 0x123456789abcdef0ULL;
+  const auto tick_begin = cycle_counter();
+  const auto wall_begin = Clock::now();
+#if defined(__x86_64__)
+  if (test_case == StoreForwardCase::Partial32To64) {
+    for (std::size_t index = 0; index < iterations; ++index) {
+      asm volatile("movl %k[value], (%[address])\n\tmovq (%[address]), %[value]"
+                   : [value] "+r"(value) : [address] "r"(base) : "memory");
+    }
+  } else if (test_case == StoreForwardCase::OverlapByOne) {
+    for (std::size_t index = 0; index < iterations; ++index) {
+      asm volatile("movq %[value], (%[store])\n\tmovq (%[load]), %[value]"
+                   : [value] "+r"(value)
+                   : [store] "r"(base), [load] "r"(base + 1) : "memory");
+    }
+  } else {
+    for (std::size_t index = 0; index < iterations; ++index) {
+      asm volatile("movq %[value], (%[address])\n\tmovq (%[address]), %[value]"
+                   : [value] "+r"(value) : [address] "r"(base) : "memory");
+    }
+  }
+#elif defined(__aarch64__)
+  if (test_case == StoreForwardCase::Partial32To64) {
+    for (std::size_t index = 0; index < iterations; ++index) {
+      asm volatile("str %w[value], [%[address]]\n\tldr %x[value], [%[address]]"
+                   : [value] "+r"(value) : [address] "r"(base) : "memory");
+    }
+  } else if (test_case == StoreForwardCase::OverlapByOne) {
+    for (std::size_t index = 0; index < iterations; ++index) {
+      asm volatile("str %x[value], [%[store]]\n\tldr %x[value], [%[load]]"
+                   : [value] "+r"(value)
+                   : [store] "r"(base), [load] "r"(base + 1) : "memory");
+    }
+  } else {
+    for (std::size_t index = 0; index < iterations; ++index) {
+      asm volatile("str %x[value], [%[address]]\n\tldr %x[value], [%[address]]"
+                   : [value] "+r"(value) : [address] "r"(base) : "memory");
+    }
+  }
+#endif
+  const double seconds = seconds_between(wall_begin, Clock::now());
+  const auto ticks = cycle_counter() - tick_begin;
+  global_sink = global_sink ^ value;
+  return {seconds * 1e9 / static_cast<double>(iterations),
+          static_cast<double>(ticks) / static_cast<double>(iterations)};
+}
+
+void benchmark_store_forwarding(const Options &options, int cpu,
+                                std::vector<Observation> &observations) {
+  if (options.profile == "smoke") return;
+  pin_to_cpu(cpu);
+  const std::size_t iterations = options.profile == "quick" ? 1000000 : 5000000;
+  struct Case {
+    StoreForwardCase value;
+    const char *name;
+    int store_bytes;
+    int load_bytes;
+    int store_offset;
+    int load_offset;
+  };
+  const std::array<Case, 4> cases{{
+      {StoreForwardCase::Exact64, "exact-8-to-8", 8, 8, 0, 0},
+      {StoreForwardCase::Partial32To64, "partial-4-to-8", 4, 8, 0, 0},
+      {StoreForwardCase::OverlapByOne, "overlap-offset-1", 8, 8, 0, 1},
+      {StoreForwardCase::SplitLine, "split-cache-line", 8, 8, 60, 60},
+  }};
+  for (const auto &test_case : cases) {
+    const auto [nanoseconds, ticks] = store_forward_measurement(test_case.value, iterations);
+    const Labels labels{{"case", test_case.name},
+                        {"store_bytes", std::to_string(test_case.store_bytes)},
+                        {"load_bytes", std::to_string(test_case.load_bytes)},
+                        {"store_offset", std::to_string(test_case.store_offset)},
+                        {"load_offset", std::to_string(test_case.load_offset)},
+                        {"cpu", std::to_string(cpu)}};
+    add_observation(observations, "store_forwarding", "store_load_latency",
+                    nanoseconds, "ns/pair", "medium",
+                    "dependent store followed by overlapping load", labels);
+    add_observation(observations, "store_forwarding", "store_load_counter_ticks",
+                    ticks, "counter-ticks/pair", "low",
+                    "platform counter delta for dependent store/load pair", labels);
+  }
+}
+
 std::string cpu_relation(const CpuInfo &left, const CpuInfo &right) {
   if (left.socket == right.socket && left.die == right.die && left.core == right.core) {
     return "smt-sibling";
@@ -1434,6 +1738,82 @@ void multiply_four_chains(std::size_t iterations) {
   global_sink = global_sink ^ a0 ^ a1 ^ a2 ^ a3;
 }
 
+void fp_add_one_chain(std::size_t iterations) {
+  double value = 1.0;
+  const double increment = 0.0000001;
+  for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
+#if defined(__x86_64__)
+    asm volatile(".rept 32\n\taddsd %[increment], %[value]\n\t.endr"
+                 : [value] "+x"(value) : [increment] "x"(increment));
+#elif defined(__aarch64__)
+    asm volatile(".rept 32\n\tfadd %d[value], %d[value], %d[increment]\n\t.endr"
+                 : [value] "+w"(value) : [increment] "w"(increment));
+#endif
+  }
+  global_sink = global_sink ^ static_cast<std::uint64_t>(value);
+}
+
+void fp_add_four_chains(std::size_t iterations) {
+  double a0 = 1.0, a1 = 2.0, a2 = 3.0, a3 = 4.0;
+  const double increment = 0.0000001;
+  for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
+#if defined(__x86_64__)
+    asm volatile(".rept 8\n\t"
+                 "addsd %[increment], %[a0]\n\taddsd %[increment], %[a1]\n\t"
+                 "addsd %[increment], %[a2]\n\taddsd %[increment], %[a3]\n\t.endr"
+                 : [a0] "+x"(a0), [a1] "+x"(a1), [a2] "+x"(a2), [a3] "+x"(a3)
+                 : [increment] "x"(increment));
+#elif defined(__aarch64__)
+    asm volatile(".rept 8\n\t"
+                 "fadd %d[a0], %d[a0], %d[increment]\n\t"
+                 "fadd %d[a1], %d[a1], %d[increment]\n\t"
+                 "fadd %d[a2], %d[a2], %d[increment]\n\t"
+                 "fadd %d[a3], %d[a3], %d[increment]\n\t.endr"
+                 : [a0] "+w"(a0), [a1] "+w"(a1), [a2] "+w"(a2), [a3] "+w"(a3)
+                 : [increment] "w"(increment));
+#endif
+  }
+  global_sink = global_sink ^ static_cast<std::uint64_t>(a0 + a1 + a2 + a3);
+}
+
+void fp_multiply_one_chain(std::size_t iterations) {
+  double value = 1.0001;
+  const double multiplier = 1.0000000001;
+  for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
+#if defined(__x86_64__)
+    asm volatile(".rept 16\n\tmulsd %[multiplier], %[value]\n\t.endr"
+                 : [value] "+x"(value) : [multiplier] "x"(multiplier));
+#elif defined(__aarch64__)
+    asm volatile(".rept 16\n\tfmul %d[value], %d[value], %d[multiplier]\n\t.endr"
+                 : [value] "+w"(value) : [multiplier] "w"(multiplier));
+#endif
+  }
+  global_sink = global_sink ^ static_cast<std::uint64_t>(value);
+}
+
+void fp_multiply_four_chains(std::size_t iterations) {
+  double a0 = 1.0001, a1 = 1.0002, a2 = 1.0003, a3 = 1.0004;
+  const double multiplier = 1.0000000001;
+  for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
+#if defined(__x86_64__)
+    asm volatile(".rept 4\n\t"
+                 "mulsd %[multiplier], %[a0]\n\tmulsd %[multiplier], %[a1]\n\t"
+                 "mulsd %[multiplier], %[a2]\n\tmulsd %[multiplier], %[a3]\n\t.endr"
+                 : [a0] "+x"(a0), [a1] "+x"(a1), [a2] "+x"(a2), [a3] "+x"(a3)
+                 : [multiplier] "x"(multiplier));
+#elif defined(__aarch64__)
+    asm volatile(".rept 4\n\t"
+                 "fmul %d[a0], %d[a0], %d[multiplier]\n\t"
+                 "fmul %d[a1], %d[a1], %d[multiplier]\n\t"
+                 "fmul %d[a2], %d[a2], %d[multiplier]\n\t"
+                 "fmul %d[a3], %d[a3], %d[multiplier]\n\t.endr"
+                 : [a0] "+w"(a0), [a1] "+w"(a1), [a2] "+w"(a2), [a3] "+w"(a3)
+                 : [multiplier] "w"(multiplier));
+#endif
+  }
+  global_sink = global_sink ^ static_cast<std::uint64_t>(a0 + a1 + a2 + a3);
+}
+
 void record_kernel(std::vector<Observation> &observations, const std::string &name,
                    std::size_t operations, const KernelMeasurement &measurement,
                    const Labels &extra_labels = {}) {
@@ -1491,6 +1871,424 @@ void benchmark_pipeline(const Options &options, std::vector<Observation> &observ
   auto mul4 = measure_kernel([&] { multiply_four_chains(iterations); });
   record_kernel(observations, "integer_mul_parallel4", iterations * 32, mul4,
                 {{"chains", "4"}, {"bound", "backend"}});
+  auto fp_add1 = measure_kernel([&] { fp_add_one_chain(iterations); });
+  record_kernel(observations, "fp64_add_dependency", iterations * 32, fp_add1,
+                {{"chains", "1"}, {"bound", "dependency"}, {"class", "floating-point"}});
+  auto fp_add4 = measure_kernel([&] { fp_add_four_chains(iterations); });
+  record_kernel(observations, "fp64_add_parallel4", iterations * 32, fp_add4,
+                {{"chains", "4"}, {"bound", "backend"}, {"class", "floating-point"}});
+  auto fp_mul1 = measure_kernel([&] { fp_multiply_one_chain(iterations); });
+  record_kernel(observations, "fp64_mul_dependency", iterations * 16, fp_mul1,
+                {{"chains", "1"}, {"bound", "dependency"}, {"class", "floating-point"}});
+  auto fp_mul4 = measure_kernel([&] { fp_multiply_four_chains(iterations); });
+  record_kernel(observations, "fp64_mul_parallel4", iterations * 16, fp_mul4,
+                {{"chains", "4"}, {"bound", "backend"}, {"class", "floating-point"}});
+}
+
+std::uint64_t compute_add_batch(std::uint64_t seed) {
+  std::uint64_t a0 = seed + 1, a1 = seed + 3, a2 = seed + 5, a3 = seed + 7;
+  std::uint64_t a4 = seed + 11, a5 = seed + 13, a6 = seed + 17, a7 = seed + 19;
+#if defined(__x86_64__)
+  asm volatile(".rept 32\n\t"
+               "addq $1, %[a0]\n\taddq $1, %[a1]\n\taddq $1, %[a2]\n\taddq $1, %[a3]\n\t"
+               "addq $1, %[a4]\n\taddq $1, %[a5]\n\taddq $1, %[a6]\n\taddq $1, %[a7]\n\t.endr"
+               : [a0] "+r"(a0), [a1] "+r"(a1), [a2] "+r"(a2), [a3] "+r"(a3),
+                 [a4] "+r"(a4), [a5] "+r"(a5), [a6] "+r"(a6), [a7] "+r"(a7));
+#elif defined(__aarch64__)
+  asm volatile(".rept 32\n\t"
+               "add %[a0], %[a0], #1\n\tadd %[a1], %[a1], #1\n\t"
+               "add %[a2], %[a2], #1\n\tadd %[a3], %[a3], #1\n\t"
+               "add %[a4], %[a4], #1\n\tadd %[a5], %[a5], #1\n\t"
+               "add %[a6], %[a6], #1\n\tadd %[a7], %[a7], #1\n\t.endr"
+               : [a0] "+r"(a0), [a1] "+r"(a1), [a2] "+r"(a2), [a3] "+r"(a3),
+                 [a4] "+r"(a4), [a5] "+r"(a5), [a6] "+r"(a6), [a7] "+r"(a7));
+#endif
+  return a0 ^ a1 ^ a2 ^ a3 ^ a4 ^ a5 ^ a6 ^ a7;
+}
+
+void measure_compute_scaling_point(const Options &options, const std::vector<int> &selected,
+                                   const std::string &scope,
+                                   std::vector<Observation> &observations) {
+  struct Result {
+    std::uint64_t operations = 0;
+    std::uint64_t sink = 0;
+    double seconds = 0.0;
+    PerfCounts perf;
+  };
+  std::vector<Result> results(selected.size());
+  std::atomic<std::size_t> ready{0};
+  std::atomic<bool> go{false};
+  std::atomic<bool> stop{false};
+  std::vector<std::thread> workers;
+  for (std::size_t index = 0; index < selected.size(); ++index) {
+    workers.emplace_back([&, index] {
+      pin_to_cpu(selected[index]);
+      PerfGroup perf;
+      ready.fetch_add(1, std::memory_order_release);
+      while (!go.load(std::memory_order_acquire)) cpu_relax();
+      const auto begin = Clock::now();
+      perf.start();
+      std::uint64_t sink = index + 1;
+      std::uint64_t operations = 0;
+      while (!stop.load(std::memory_order_relaxed)) {
+        sink ^= compute_add_batch(sink);
+        operations += 256;
+      }
+      results[index].perf = perf.stop();
+      results[index].seconds = seconds_between(begin, Clock::now());
+      results[index].operations = operations;
+      results[index].sink = sink;
+    });
+  }
+  while (ready.load(std::memory_order_acquire) != selected.size()) std::this_thread::yield();
+  go.store(true, std::memory_order_release);
+  std::this_thread::sleep_for(std::chrono::milliseconds(
+      std::max(30, options.profile == "quick" ? options.duration_ms / 2 : options.duration_ms)));
+  stop.store(true, std::memory_order_release);
+  for (auto &worker : workers) worker.join();
+
+  std::uint64_t total_operations = 0;
+  double elapsed = 0.0;
+  std::vector<double> frequencies;
+  std::ostringstream cpu_list;
+  for (std::size_t index = 0; index < results.size(); ++index) {
+    if (index) cpu_list << ',';
+    cpu_list << selected[index];
+    total_operations += results[index].operations;
+    elapsed = std::max(elapsed, results[index].seconds);
+    global_sink = global_sink ^ results[index].sink;
+    if (results[index].perf.available && results[index].seconds > 0.0) {
+      frequencies.push_back(results[index].perf.cycles / results[index].seconds / 1e9);
+    }
+  }
+  const Labels labels{{"threads", std::to_string(selected.size())},
+                      {"scope", scope}, {"cpus", cpu_list.str()}};
+  add_observation(observations, "compute_scaling", "integer_add_throughput",
+                  static_cast<double>(total_operations) / std::max(elapsed, 1e-12) / 1e9,
+                  "Gop/s", "medium", "parallel pinned independent integer-add chains", labels);
+  if (!frequencies.empty()) {
+    add_observation(observations, "compute_scaling", "effective_core_frequency",
+                    median_double(std::move(frequencies)), "GHz", "medium",
+                    "median perf core cycles per wall second across active workers", labels);
+  }
+}
+
+void benchmark_compute_scaling(const Options &options, const std::vector<CpuInfo> &cpus,
+                               std::vector<Observation> &observations) {
+  if (options.profile == "smoke") return;
+  const auto physical = numa_balanced_physical_cpus(cpus);
+  const std::size_t maximum = options.profile == "quick"
+      ? std::min<std::size_t>(physical.size(), 4) : physical.size();
+  for (const std::size_t count : thread_counts(maximum)) {
+    std::vector<int> selected;
+    for (std::size_t index = 0; index < count; ++index) selected.push_back(physical[index].cpu);
+    measure_compute_scaling_point(options, selected, "physical-cores", observations);
+  }
+  for (std::size_t left = 0; left < cpus.size(); ++left) {
+    bool found = false;
+    for (std::size_t right = left + 1; right < cpus.size(); ++right) {
+      if (cpu_relation(cpus[left], cpus[right]) == "smt-sibling") {
+        measure_compute_scaling_point(options, {cpus[left].cpu, cpus[right].cpu},
+                                      "smt-siblings", observations);
+        found = true;
+        break;
+      }
+    }
+    if (found) break;
+  }
+}
+
+using GeneratedFunction = void (*)();
+
+void benchmark_instruction_fetch(const Options &options, int cpu,
+                                 std::vector<Observation> &observations,
+                                 std::vector<std::string> &warnings) {
+  if (options.profile == "smoke") return;
+  pin_to_cpu(cpu);
+  const std::size_t maximum = options.profile == "quick" ? 256U * 1024U
+      : options.profile == "deep" ? 4U * 1024U * 1024U
+                                  : 1U * 1024U * 1024U;
+  const std::size_t target_bytes = options.profile == "quick" ? 32U * 1024U * 1024U
+      : options.profile == "deep" ? 256U * 1024U * 1024U
+                                  : 128U * 1024U * 1024U;
+#if defined(__x86_64__)
+  const std::array<std::pair<std::size_t, std::array<std::uint8_t, 8>>, 3> encodings{{
+      {1, {0x90, 0, 0, 0, 0, 0, 0, 0}},
+      {4, {0x0f, 0x1f, 0x40, 0x00, 0, 0, 0, 0}},
+      {8, {0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00}},
+  }};
+#endif
+  try {
+    for (const std::size_t footprint : power_sizes(4U * 1024U, maximum)) {
+#if defined(__x86_64__)
+      for (const auto &[instruction_bytes, encoding] : encodings) {
+        const std::size_t body_bytes = footprint - (footprint % instruction_bytes);
+        ExecutableBuffer code(body_bytes + 1);
+        for (std::size_t offset = 0; offset < body_bytes; offset += instruction_bytes) {
+          std::memcpy(code.bytes() + offset, encoding.data(), instruction_bytes);
+        }
+        code.bytes()[body_bytes] = std::byte{0xc3};
+        code.seal();
+        const auto function = code.function_at<GeneratedFunction>();
+        const std::size_t passes = std::max<std::size_t>(1, target_bytes / body_bytes);
+        const auto measurement = measure_kernel([&] {
+          for (std::size_t pass = 0; pass < passes; ++pass) function();
+        });
+        const double instructions = static_cast<double>(body_bytes / instruction_bytes) * passes;
+        const Labels labels{{"cpu", std::to_string(cpu)},
+                            {"working_set_bytes", std::to_string(body_bytes)},
+                            {"instruction_bytes", std::to_string(instruction_bytes)},
+                            {"passes", std::to_string(passes)}};
+        add_observation(observations, "instruction_fetch", "code_delivery_bandwidth",
+                        static_cast<double>(body_bytes) * passes / measurement.seconds / 1e9,
+                        "GB/s", "medium", "W^X generated NOP body scanned repeatedly", labels);
+        add_observation(observations, "instruction_fetch", "instruction_rate",
+                        instructions / measurement.seconds / 1e9, "Ginst/s", "medium",
+                        "known generated NOP count divided by wall time", labels);
+        if (measurement.perf.available && measurement.perf.cycles > 0.0) {
+          add_observation(observations, "instruction_fetch", "ipc",
+                          measurement.perf.instructions / measurement.perf.cycles,
+                          "instructions/cycle", "high",
+                          "perf retired instructions / core cycles for generated code", labels);
+        }
+      }
+#elif defined(__aarch64__)
+      const std::size_t body_bytes = footprint - (footprint % 4);
+      ExecutableBuffer code(body_bytes + 4);
+      constexpr std::uint32_t nop = 0xd503201fU;
+      constexpr std::uint32_t ret = 0xd65f03c0U;
+      for (std::size_t offset = 0; offset < body_bytes; offset += 4)
+        std::memcpy(code.bytes() + offset, &nop, sizeof(nop));
+      std::memcpy(code.bytes() + body_bytes, &ret, sizeof(ret));
+      code.seal();
+      const auto function = code.function_at<GeneratedFunction>();
+      const std::size_t passes = std::max<std::size_t>(1, target_bytes / body_bytes);
+      const auto measurement = measure_kernel([&] {
+        for (std::size_t pass = 0; pass < passes; ++pass) function();
+      });
+      const double instructions = static_cast<double>(body_bytes / 4) * passes;
+      const Labels labels{{"cpu", std::to_string(cpu)},
+                          {"working_set_bytes", std::to_string(body_bytes)},
+                          {"instruction_bytes", "4"}, {"passes", std::to_string(passes)}};
+      add_observation(observations, "instruction_fetch", "code_delivery_bandwidth",
+                      static_cast<double>(body_bytes) * passes / measurement.seconds / 1e9,
+                      "GB/s", "medium", "W^X generated A64 NOP body scanned repeatedly", labels);
+      add_observation(observations, "instruction_fetch", "instruction_rate",
+                      instructions / measurement.seconds / 1e9, "Ginst/s", "medium",
+                      "known generated A64 NOP count divided by wall time", labels);
+      if (measurement.perf.available && measurement.perf.cycles > 0.0) {
+        add_observation(observations, "instruction_fetch", "ipc",
+                        measurement.perf.instructions / measurement.perf.cycles,
+                        "instructions/cycle", "high",
+                        "perf retired instructions / core cycles for generated code", labels);
+      }
+#endif
+    }
+  } catch (const std::exception &error) {
+    warnings.push_back(std::string("指令侧带宽探针提前停止：") + error.what());
+  }
+}
+
+void benchmark_btb_capacity(const Options &options, int cpu,
+                            std::vector<Observation> &observations,
+                            std::vector<std::string> &warnings) {
+  if (options.profile == "smoke") return;
+  pin_to_cpu(cpu);
+  const std::size_t maximum = options.profile == "quick" ? 2048
+      : options.profile == "deep" ? 32768 : 8192;
+  const std::size_t target_branches = options.profile == "quick" ? 500000 :
+      options.profile == "deep" ? 4000000 : 2000000;
+  try {
+    for (const std::string branch_type : {"unconditional", "conditional-taken"}) {
+      for (const std::size_t spacing : {std::size_t{4}, std::size_t{8}, std::size_t{16},
+                                        std::size_t{32}, std::size_t{64}}) {
+        for (const std::size_t count : power_sizes(16, maximum)) {
+#if defined(__x86_64__)
+        const std::size_t prefix = branch_type == "conditional-taken" ? 2 : 0;
+        ExecutableBuffer code(prefix + count * spacing + 4);
+        std::memset(code.bytes(), 0x90, code.size());
+        if (prefix != 0) {
+          code.bytes()[0] = std::byte{0x31};
+          code.bytes()[1] = std::byte{0xc0};
+        }
+        for (std::size_t index = 0; index < count; ++index) {
+          const std::size_t offset = prefix + index * spacing;
+          code.bytes()[offset] = branch_type == "conditional-taken"
+              ? std::byte{0x74} : std::byte{0xeb};
+          code.bytes()[offset + 1] = static_cast<std::byte>(spacing - 2);
+        }
+        code.bytes()[prefix + count * spacing] = std::byte{0xc3};
+#elif defined(__aarch64__)
+        const std::size_t prefix = branch_type == "conditional-taken" ? 4 : 0;
+        ExecutableBuffer code(prefix + count * spacing + 4);
+        constexpr std::uint32_t nop = 0xd503201fU;
+        constexpr std::uint32_t ret = 0xd65f03c0U;
+        for (std::size_t offset = 0; offset < code.size() - 4; offset += 4)
+          std::memcpy(code.bytes() + offset, &nop, sizeof(nop));
+        if (prefix != 0) {
+          constexpr std::uint32_t compare_zero = 0xeb1f03ffU;
+          std::memcpy(code.bytes(), &compare_zero, sizeof(compare_zero));
+        }
+        const std::uint32_t distance = static_cast<std::uint32_t>(spacing / 4);
+        const std::uint32_t branch = branch_type == "conditional-taken"
+            ? 0x54000000U | (distance << 5) : 0x14000000U | distance;
+        for (std::size_t index = 0; index < count; ++index)
+          std::memcpy(code.bytes() + prefix + index * spacing, &branch, sizeof(branch));
+        std::memcpy(code.bytes() + prefix + count * spacing, &ret, sizeof(ret));
+#endif
+        code.seal();
+        const auto function = code.function_at<GeneratedFunction>();
+        const std::size_t passes = std::max<std::size_t>(1, target_branches / count);
+        const auto measurement = measure_kernel([&] {
+          for (std::size_t pass = 0; pass < passes; ++pass) function();
+        });
+        const double branches = static_cast<double>(count) * passes;
+        const Labels labels{{"cpu", std::to_string(cpu)},
+                            {"branch_type", branch_type},
+                            {"branch_count", std::to_string(count)},
+                            {"spacing_bytes", std::to_string(spacing)},
+                            {"code_bytes", std::to_string(count * spacing)}};
+        add_observation(observations, "branch_structure", "btb_branch_latency",
+                        measurement.seconds * 1e9 / branches, "ns/branch", "low",
+                        "generated taken direct branches with independently varied footprint", labels);
+        add_observation(observations, "branch_structure", "btb_counter_ticks",
+                        static_cast<double>(measurement.counter_ticks) / branches,
+                        "counter-ticks/branch", "low",
+                        "platform counter ticks per generated taken branch", labels);
+        if (measurement.perf.branch_counters_available && measurement.perf.branches > 0.0) {
+          add_observation(observations, "branch_structure", "btb_miss_rate",
+                          100.0 * measurement.perf.branch_misses / measurement.perf.branches,
+                          "%", "medium", "generic perf branch misses during BTB footprint sweep",
+                          labels);
+        }
+      }
+    }
+    }
+  } catch (const std::exception &error) {
+    warnings.push_back(std::string("BTB 容量探针提前停止：") + error.what());
+  }
+}
+
+void benchmark_return_stack(const Options &options, int cpu,
+                            std::vector<Observation> &observations,
+                            std::vector<std::string> &warnings) {
+  if (options.profile == "smoke") return;
+  pin_to_cpu(cpu);
+  const std::size_t maximum = options.profile == "quick" ? 64 : 256;
+  const std::size_t target_returns = options.profile == "quick" ? 250000 : 1000000;
+  try {
+    for (const std::size_t depth : power_sizes(1, maximum)) {
+#if defined(__x86_64__)
+      constexpr std::size_t slot = 6;
+      ExecutableBuffer code(depth * slot + 1);
+      for (std::size_t index = 0; index < depth; ++index) {
+        const std::size_t offset = index * slot;
+        code.bytes()[offset] = std::byte{0xe8};
+        const std::int32_t displacement = 1;
+        std::memcpy(code.bytes() + offset + 1, &displacement, sizeof(displacement));
+        code.bytes()[offset + 5] = std::byte{0xc3};
+      }
+      code.bytes()[depth * slot] = std::byte{0xc3};
+#elif defined(__aarch64__)
+      constexpr std::size_t slot = 16;
+      ExecutableBuffer code(depth * slot + 4);
+      constexpr std::uint32_t save_frame_and_lr = 0xa9bf7bfdU;
+      constexpr std::uint32_t call_next = 0x94000003U;
+      constexpr std::uint32_t restore_frame_and_lr = 0xa8c17bfdU;
+      constexpr std::uint32_t ret = 0xd65f03c0U;
+      for (std::size_t index = 0; index < depth; ++index) {
+        const std::size_t offset = index * slot;
+        std::memcpy(code.bytes() + offset, &save_frame_and_lr, sizeof(save_frame_and_lr));
+        std::memcpy(code.bytes() + offset + 4, &call_next, sizeof(call_next));
+        std::memcpy(code.bytes() + offset + 8, &restore_frame_and_lr,
+                    sizeof(restore_frame_and_lr));
+        std::memcpy(code.bytes() + offset + 12, &ret, sizeof(ret));
+      }
+      std::memcpy(code.bytes() + depth * slot, &ret, sizeof(ret));
+#endif
+      code.seal();
+      const auto function = code.function_at<GeneratedFunction>();
+      const std::size_t returns_per_call = depth + 1;
+      const std::size_t passes = std::max<std::size_t>(1, target_returns / returns_per_call);
+      const auto measurement = measure_kernel([&] {
+        for (std::size_t pass = 0; pass < passes; ++pass) function();
+      });
+      const double returns = static_cast<double>(returns_per_call) * passes;
+      const Labels labels{{"cpu", std::to_string(cpu)},
+                          {"depth", std::to_string(depth)},
+                          {"unique_return_addresses", std::to_string(depth)}};
+      add_observation(observations, "branch_structure", "return_stack_latency",
+                      measurement.seconds * 1e9 / returns, "ns/return", "low",
+                      "generated nested calls with a unique return address at each depth", labels);
+      if (measurement.perf.branch_counters_available && measurement.perf.branches > 0.0) {
+        add_observation(observations, "branch_structure", "return_stack_miss_rate",
+                        100.0 * measurement.perf.branch_misses / measurement.perf.branches,
+                        "%", "medium", "generic perf branch misses during nested call/return chain",
+                        labels);
+      }
+    }
+  } catch (const std::exception &error) {
+    warnings.push_back(std::string("返回地址栈探针提前停止：") + error.what());
+  }
+}
+
+void benchmark_indirect_targets(const Options &options, int cpu,
+                                std::vector<Observation> &observations,
+                                std::vector<std::string> &warnings) {
+  if (options.profile == "smoke") return;
+  pin_to_cpu(cpu);
+  const std::size_t maximum = options.profile == "quick" ? 512
+      : options.profile == "deep" ? 16384 : 4096;
+  const std::size_t target_calls = options.profile == "quick" ? 250000 :
+      options.profile == "deep" ? 2000000 : 1000000;
+  constexpr std::size_t slot = 16;
+  try {
+    ExecutableBuffer code(maximum * slot);
+#if defined(__x86_64__)
+    std::memset(code.bytes(), 0x90, code.size());
+    for (std::size_t index = 0; index < maximum; ++index)
+      code.bytes()[index * slot] = std::byte{0xc3};
+#elif defined(__aarch64__)
+    constexpr std::uint32_t nop = 0xd503201fU;
+    constexpr std::uint32_t ret = 0xd65f03c0U;
+    for (std::size_t offset = 0; offset < code.size(); offset += 4)
+      std::memcpy(code.bytes() + offset, &nop, sizeof(nop));
+    for (std::size_t index = 0; index < maximum; ++index)
+      std::memcpy(code.bytes() + index * slot, &ret, sizeof(ret));
+#endif
+    code.seal();
+    for (const std::size_t count : power_sizes(1, maximum)) {
+      std::vector<GeneratedFunction> targets;
+      targets.reserve(count);
+      for (std::size_t index = 0; index < count; ++index)
+        targets.push_back(code.function_at<GeneratedFunction>(index * slot));
+      std::vector<std::size_t> order(count);
+      std::iota(order.begin(), order.end(), 0);
+      std::mt19937 random(options.seed ^ static_cast<unsigned>(count));
+      std::shuffle(order.begin(), order.end(), random);
+      const std::size_t rounds = std::max<std::size_t>(1, target_calls / count);
+      const auto measurement = measure_kernel([&] {
+        for (std::size_t round = 0; round < rounds; ++round)
+          for (const std::size_t index : order) targets[index]();
+      });
+      const double calls = static_cast<double>(count) * rounds;
+      const Labels labels{{"cpu", std::to_string(cpu)},
+                          {"target_count", std::to_string(count)},
+                          {"target_spacing_bytes", std::to_string(slot)}};
+      add_observation(observations, "branch_structure", "indirect_call_latency",
+                      measurement.seconds * 1e9 / calls, "ns/call", "low",
+                      "one indirect call site visits a shuffled set of generated return targets",
+                      labels);
+      if (measurement.perf.branch_counters_available && measurement.perf.branches > 0.0) {
+        add_observation(observations, "branch_structure", "indirect_call_miss_rate",
+                        100.0 * measurement.perf.branch_misses / measurement.perf.branches,
+                        "%", "medium", "generic perf branch misses during indirect target sweep",
+                        labels);
+      }
+    }
+  } catch (const std::exception &error) {
+    warnings.push_back(std::string("间接分支目标容量探针提前停止：") + error.what());
+  }
 }
 
 #if defined(__GNUC__) && !defined(__clang__)
@@ -1550,6 +2348,53 @@ void benchmark_branches(const Options &options, std::vector<Observation> &observ
                       "instructions/cycle", "high", "perf retired instructions / core cycles", labels);
     }
   }
+}
+
+void benchmark_branch_history(const Options &options, int cpu,
+                              std::vector<Observation> &observations) {
+  if (options.profile == "smoke") return;
+  pin_to_cpu(cpu);
+  constexpr std::size_t count = 32768;
+  const std::size_t maximum = options.profile == "quick" ? 256
+      : options.profile == "deep" ? 16384 : 4096;
+  const std::size_t target_branches = options.profile == "quick" ? 500000 : 2000000;
+  for (const std::size_t period : power_sizes(1, maximum)) {
+    std::vector<std::uint8_t> seed_pattern(period, 1);
+    if (period > 1) {
+      std::mt19937 random(options.seed ^ static_cast<unsigned>(period * 0x9e3779b1U));
+      for (auto &value : seed_pattern) value = static_cast<std::uint8_t>(random() & 1U);
+      seed_pattern.front() = 1;
+      seed_pattern[period / 2] = 0;
+    }
+    std::vector<std::uint8_t> pattern(count);
+    for (std::size_t index = 0; index < count; ++index)
+      pattern[index] = seed_pattern[index % period];
+    const std::size_t passes = std::max<std::size_t>(1, target_branches / count);
+    const auto measurement = measure_kernel([&] {
+      global_sink = global_sink ^ branch_loop(pattern.data(), pattern.size(), passes);
+    });
+    const double branches = static_cast<double>(count) * passes;
+    const Labels labels{{"cpu", std::to_string(cpu)}, {"history_period", std::to_string(period)}};
+    add_observation(observations, "branch_structure", "history_period_latency",
+                    measurement.seconds * 1e9 / branches, "ns/branch", "low",
+                    "scalar conditional branch over a repeating pseudo-random direction period",
+                    labels);
+    if (measurement.perf.branch_counters_available && measurement.perf.branches > 0.0) {
+      add_observation(observations, "branch_structure", "history_period_miss_rate",
+                      100.0 * measurement.perf.branch_misses / measurement.perf.branches,
+                      "%", "medium", "generic perf branch misses during history-period sweep",
+                      labels);
+    }
+  }
+}
+
+void benchmark_branch_structures(const Options &options, int cpu,
+                                 std::vector<Observation> &observations,
+                                 std::vector<std::string> &warnings) {
+  benchmark_btb_capacity(options, cpu, observations, warnings);
+  benchmark_branch_history(options, cpu, observations);
+  benchmark_return_stack(options, cpu, observations, warnings);
+  benchmark_indirect_targets(options, cpu, observations, warnings);
 }
 
 #if defined(__x86_64__)
@@ -1817,10 +2662,22 @@ int main(int argc, char **argv) {
     benchmark_stride_prefetch(options, primary_cpu, observations, warnings);
     section("memory-level parallelism");
     benchmark_memory_parallelism(options, primary_cpu, observations, warnings);
+    section("base-page versus transparent-hugepage policy");
+    benchmark_page_policy(options, primary_cpu, observations, warnings);
+    section("loaded memory latency");
+    benchmark_loaded_memory_latency(options, cpus, observations, warnings);
+    section("store-to-load forwarding");
+    benchmark_store_forwarding(options, primary_cpu, observations);
+    section("instruction-side bandwidth and footprint");
+    benchmark_instruction_fetch(options, primary_cpu, observations, warnings);
     section("core pipeline and IPC");
     benchmark_pipeline(options, observations, primary_cpu);
+    section("multi-core and SMT compute scaling");
+    benchmark_compute_scaling(options, cpus, observations);
     section("branch predictor");
     benchmark_branches(options, observations, primary_cpu);
+    section("BTB, history, return-stack and indirect-target sweeps");
+    benchmark_branch_structures(options, primary_cpu, observations, warnings);
     section("core-to-core cache-line latency");
     benchmark_core_latency(options, cpus, observations, warnings);
     section("false sharing / coherence line");

@@ -65,7 +65,11 @@ load p0 → load p1 → load p2 → ...
 
 首个拐点只是某级 TLB/页表 cache 的容量候选，不应直接命名为“L1 DTLB entries”。THP 状态、页表层数、ASID/PCID、虚拟化二阶段翻译都会改变结果。
 
-待扩展：2 MiB/1 GiB hugepage TLB、iTLB、TLB shootdown、page-walk concurrency、NUMA page-table placement。
+standard/deep 还会对同一随机依赖加载工作集分别请求 `MADV_NOHUGEPAGE` 与
+`MADV_HUGEPAGE`，并从 `/proc/self/smaps` 读取 `AnonHugePages`。因此报告能区分“提出
+THP 建议”和“映射确实获得匿名大页”；madvise 不保证内核一定折叠页面。
+
+待扩展：显式 hugetlbfs 2 MiB/1 GiB TLB、iTLB、TLB shootdown、page-walk concurrency、NUMA page-table placement。
 
 ## 5. 内存带宽
 
@@ -82,7 +86,14 @@ load p0 → load p1 → load p2 → ...
 
 它不是理论 DDR 带宽：不读取 DIMM 速率/通道数，不把 ECC、command、coherence、RFO 和 fabric protocol bytes 计入。工作集应大于 LLC；短 profile 或用户指定过小工作集可能测到 cache bandwidth。
 
-待扩展：non-temporal write、read-for-ownership、混合读写比例、随机带宽、loaded latency、bank/rank/channel interleave、DRAM row hit/miss、memory controller 数量、CXL/PMEM 分层。
+带载延迟探针在一个固定物理核心执行 DRAM 级随机依赖加载，同时逐级增加其他物理核心上的流式读取线程。每个点同时记录 `ns/access`、压力线程数和真正达到的并发 `GB/s`，用于观察控制器/互联接近饱和时的 latency cliff。
+
+指令侧带宽使用 W^X 生成代码：先写入已知 NOP/RET 序列，清理指令缓存后再通过
+`mprotect` 切换为 RX，从不创建 RWX 映射。x86/C86 扫描 1/4/8 字节 NOP，ARM64 扫描
+4 字节 A64 NOP。`code_delivery_bandwidth` 按每轮代码体字节数计算，适合观察 L1I、
+iTLB 和下级取指路径的相对台阶，不应解释成 DRAM 物理带宽。
+
+待扩展：non-temporal write、read-for-ownership、混合读写比例、随机带宽、bank/rank/channel interleave、DRAM row hit/miss、memory controller 数量、CXL/PMEM 分层。
 
 ## 6. NUMA 与互联
 
@@ -123,7 +134,8 @@ smoke/quick 每类选代表 pair；standard 采集全部可见物理核心 pair�
 - 64 个单依赖链 integer add：add dependency latency proxy；
 - 4/8 独立 add chains：integer backend 可用吞吐；
 - 1 个 multiply dependency chain：integer multiply latency；
-- 4 条独立 multiply chains：multiply throughput。
+- 4 条独立 multiply chains：multiply throughput；
+- FP64 add/multiply 的单依赖链与四独立链：标量浮点延迟和吞吐。
 
 若 `perf_event_open` 可用，每个 kernel 同时输出：
 
@@ -142,7 +154,11 @@ smoke/quick 每类选代表 pair；standard 采集全部可见物理核心 pair�
 - parallel add 的 adds/cycle 是可用 arithmetic throughput，不是“后端端口数量”；
 - dependency multiply 的 cycles/op 更接近 latency，但仍包含 loop 与计数开销。
 
-“后端有多少个”没有单一定义：执行 port、scheduler、ALU、AGU、load/store pipe、vector pipe 都不同。要进一步分解，需要增加 load-only/store-only、LEA/shift/divide、FP32/FP64、NEON/SVE/AVX2/AVX-512、混合指令对和 port-contention probes。
+“后端有多少个”没有单一定义：执行 port、scheduler、ALU、AGU、load/store pipe、vector pipe 都不同。要进一步分解，需要增加 load-only/store-only、LEA/shift/divide、FP32、NEON/SVE/AVX2/AVX-512、混合指令对和 port-contention probes。
+
+物理核心扩展探针把八条独立整数加法链固定到 NUMA 均衡的物理核心集合，按
+`1,2,4,…` 扩展；另取一组 SMT sibling 测双线程共享核心。同步采集每个工作线程的
+perf core cycles/wall-time，因此可把吞吐扩展下降与全核频率变化放在同一张报告中比较。
 
 ## 9. ROB / 乱序窗口
 
@@ -158,9 +174,22 @@ ARM64 目前不输出 ROB 数量，明确标记 unavailable。跨 ARM vendor 稳
 
 固定 scalar branch loop 测 always-taken、alternating、随机位序列，输出 ns/branch、perf branch miss rate 与 IPC。随机减 always-taken 是误预测恢复额外代价的时间代理。
 
-待扩展：BTB levels/entries/associativity、direction predictor history length、RAS depth、indirect target predictor、taken/not-taken asymmetry、跨 context predictor isolation。
+standard/deep 还运行四类 W^X/标量压力曲线：
 
-## 11. 建议补充的系统级探针
+- BTB：无条件和始终跳转条件分支，4/8/16/32/64 B 地址间距，分支数按 2× 扩展；
+- direction history：重复伪随机方向周期从 1 按 2× 扩展；
+- RAS：每层具有唯一返回地址的嵌套 call/ret 链；
+- indirect target：一个间接调用点按打乱顺序访问逐渐增多的生成目标。
+
+每类都保留 wall time，能访问 perf 时还记录 generic branch miss rate。推断器只在小足迹基线明显恶化时给出“拐点”，并固定标为低置信度；它们可能同时受到多级预测器、地址别名、iTLB、代码缓存和通用 perf 事件定义影响。
+
+待扩展：BTB associativity/set mapping、每个静态分支独立方向历史、二维间接分支点×目标扫描、taken/not-taken asymmetry、跨 context predictor isolation。
+
+## 11. Store-to-load forwarding
+
+固定核心上的依赖 store/load 对覆盖四种布局：同址 8→8 基线、同址部分 4→8、加载地址错开 1 字节，以及 8 字节访问跨越 64 字节缓存行。输出 ns/pair 和平台计数器 tick/pair；相对基线的额外代价用于识别转发失败、重放或跨行路径。该探针不把结果解释为 store queue 容量。
+
+## 12. 建议补充的系统级探针
 
 这些指标已纳入路线，但当前版本不应伪装成已实现：
 

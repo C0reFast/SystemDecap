@@ -43,6 +43,38 @@ class InferTests(unittest.TestCase):
         self.assertEqual(by_key["cache.l1.capacity"]["value"], 32768)
         self.assertTrue(diagnostics["cache_knees"])
 
+    def test_new_memory_and_branch_proxies_remain_qualified(self):
+        self.native["observations"].extend([
+            {"group": "page_policy", "metric": "random_load_latency", "value": 100.0,
+             "labels": {"policy": "base-page-advised"}},
+            {"group": "page_policy", "metric": "random_load_latency", "value": 80.0,
+             "labels": {"policy": "thp-advised"}},
+            {"group": "loaded_memory_latency", "metric": "random_load_latency_under_load",
+             "value": 90.0, "labels": {"load_threads": "0"}},
+            {"group": "loaded_memory_latency", "metric": "random_load_latency_under_load",
+             "value": 135.0, "labels": {"load_threads": "4"}},
+            {"group": "store_forwarding", "metric": "store_load_latency", "value": 1.0,
+             "labels": {"case": "exact-8-to-8"}},
+            {"group": "store_forwarding", "metric": "store_load_latency", "value": 4.0,
+             "labels": {"case": "partial-4-to-8"}},
+        ])
+        self.native["observations"].extend(
+            {"group": "branch_structure", "metric": "btb_branch_latency", "value": value,
+             "labels": {"branch_count": str(count), "spacing_bytes": "16",
+                        "branch_type": "unconditional"}}
+            for count, value in ((16, 1.0), (32, 1.0), (64, 1.0), (128, 1.6))
+        )
+        estimates, diagnostics = infer(self.system, self.native)
+        by_key = {item["key"]: item for item in estimates}
+        self.assertAlmostEqual(by_key["memory.thp_latency_ratio"]["value"], 0.8)
+        self.assertAlmostEqual(by_key["memory.loaded_latency_slowdown"]["value"], 1.5)
+        self.assertAlmostEqual(
+            by_key["memory.store_forwarding_penalty.partial-4-to-8"]["value"], 3.0
+        )
+        self.assertEqual(by_key["branch.btb_footprint_knee"]["value"], 128)
+        self.assertEqual(by_key["branch.btb_footprint_knee"]["confidence"], "low")
+        self.assertEqual(diagnostics["branch_structure_knees"]["btb"]["x"], 128)
+
 
 if __name__ == "__main__":
     unittest.main()
