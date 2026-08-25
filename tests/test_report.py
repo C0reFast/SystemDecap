@@ -49,6 +49,37 @@ class ReportTests(unittest.TestCase):
         self.assertIn('data-rows="3" data-columns="3"', rendered)
         self.assertEqual(rendered.count('<td class="measured"'), 6)
         self.assertIn("共实测 3 个无向核心对", rendered)
+        self.assertIn("data-matrix-viewer", rendered)
+        self.assertIn('data-zoom-action="fit"', rendered)
+        self.assertIn('data-zoom-action="actual"', rendered)
+        self.assertIn('min="1" max="200" step="1" value="100" data-zoom-range', rendered)
+        self.assertEqual(rendered.count('data-default-hidden="true" hidden'), 3)
+        self.assertIn("显示核间延迟明细（3 条）", rendered)
+        self.assertIn("当前显示 0 / 总计 3 条", rendered)
+
+    def test_256_cpu_core_matrix_remains_complete_and_raw_rows_start_hidden(self):
+        report = self._base_report("deep")
+        report["observations"] = [
+            {
+                "group": "core_latency", "metric": "cacheline_handoff_latency",
+                "value": 18.0 + cpu_b / 100, "unit": "ns/one-way", "confidence": "high",
+                "method": "release/acquire cache-line ping-pong",
+                "labels": {
+                    "cpu_a": "0", "cpu_b": str(cpu_b), "node_a": "0", "node_b": "0",
+                    "relation": "same-numa-different-core", "matrix_scope": "logical-cpu",
+                },
+            }
+            for cpu_b in range(1, 256)
+        ]
+
+        rendered = render_report(report)
+
+        self.assertIn('data-rows="256" data-columns="256"', rendered)
+        self.assertIn("256 × 256 · 拖动平移", rendered)
+        self.assertEqual(rendered.count('<td class="measured"'), 510)
+        self.assertEqual(rendered.count('data-default-hidden="true" hidden'), 255)
+        self.assertIn("显示核间延迟明细（255 条）", rendered)
+        self.assertIn("当前显示 0 / 总计 255 条", rendered)
 
     def test_microbenchmark_parity_charts_have_chinese_titles(self):
         report = self._base_report("quick")

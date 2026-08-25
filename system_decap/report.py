@@ -363,6 +363,7 @@ def _heatmap(
     note: str,
     row_prefix: str = "CPU",
     column_prefix: str = "MEM",
+    zoomable: bool = False,
 ) -> str:
     if not items:
         return _empty_chart(title, note)
@@ -399,10 +400,33 @@ def _heatmap(
                     f'<strong>{value:.2f}</strong><small>{_h(unit)}</small></td>'
                 )
         body.append(f"<tr><th>{_h(row_prefix)} { _h(row) }</th>{''.join(cells)}</tr>")
+    table = (
+        f'<table class="heatmap" data-rows="{len(rows)}" data-columns="{len(columns)}" '
+        f'style="--columns:{len(columns)}"><thead><tr>{header}</tr></thead>'
+        f'<tbody>{"".join(body)}</tbody></table>'
+    )
+    if zoomable:
+        content = f"""
+        <div class="matrix-toolbar" role="toolbar" aria-label="核间延迟矩阵缩放工具">
+          <button type="button" data-zoom-action="out" aria-label="缩小矩阵">−</button>
+          <input type="range" min="1" max="200" step="1" value="100" data-zoom-range aria-label="矩阵缩放比例">
+          <output data-zoom-output>100%</output>
+          <button type="button" data-zoom-action="in" aria-label="放大矩阵">＋</button>
+          <button type="button" class="text-button" data-zoom-action="fit">适配视口</button>
+          <button type="button" class="text-button" data-zoom-action="actual">100%</button>
+          <span>{len(rows)} × {len(columns)} · 拖动平移 · Ctrl/⌘＋滚轮缩放</span>
+        </div>
+        <div class="matrix-viewport" data-matrix-viewer tabindex="0"
+             aria-label="可缩放的 {_h(title)}">
+          <div class="matrix-stage">{table}</div>
+        </div>"""
+    else:
+        content = f'<div class="table-scroll">{table}</div>'
     return f"""
-    <div class="chart reveal heatmap-card"><div class="chart-heading"><h3>{_h(title)}</h3>
+    <div class="chart reveal heatmap-card{' zoomable-heatmap' if zoomable else ''}">
+      <div class="chart-heading"><h3>{_h(title)}</h3>
       <span class="range">{minimum:.2f} → {maximum:.2f} {_h(unit)}</span></div>
-      <div class="table-scroll"><table class="heatmap" data-rows="{len(rows)}" data-columns="{len(columns)}" style="--columns:{len(columns)}"><thead><tr>{header}</tr></thead><tbody>{''.join(body)}</tbody></table></div>
+      {content}
       <p class="chart-note">{_h(note)}</p>
     </div>"""
 
@@ -476,8 +500,14 @@ def _raw_table(report: dict[str, Any]) -> str:
         group = item.get("group", "")
         metric = item.get("metric", "")
         confidence = item.get("confidence", "unknown")
+        default_hidden = group == "core_latency"
+        hidden_attributes = ' data-default-hidden="true" hidden' if default_hidden else ""
+        row_attributes = (
+            f'data-search="{_h(search.lower())}" data-group="{_h(group)}"'
+            f'{hidden_attributes}'
+        )
         rows.append(
-            f'<tr data-search="{_h(search.lower())}"><td><span class="group-tag">{_h(GROUP_ZH.get(group, group))}</span>'
+            f'<tr {row_attributes}><td><span class="group-tag">{_h(GROUP_ZH.get(group, group))}</span>'
             f'<small class="identifier">{_h(group)}</small></td>'
             f'<td><b>{_h(METRIC_ZH.get(metric, metric))}</b><small class="identifier">{_h(metric)}</small>'
             f'<small>方法：{_h(_method_zh(item.get("method")))}</small></td>'
@@ -715,7 +745,7 @@ def render_report(report: dict[str, Any]) -> str:
             matrix_note = f"当前 profile 仅采集 {len(source_items)} 个代表性核心对，因此这里是稀疏矩阵；空白单元格表示未测量。"
         core_matrix = '<div class="wide">' + _heatmap(
             "核间延迟矩阵（CPU × CPU）", matrix_items, "row_cpu", "column_cpu", "ns/one-way",
-            matrix_note, "CPU", "CPU",
+            matrix_note, "CPU", "CPU", zoomable=True,
         ) + "</div>"
     os_rows = [
         (item["metric"], item["value"], item["unit"])
@@ -746,6 +776,15 @@ def render_report(report: dict[str, Any]) -> str:
     machine_name = " · ".join(filter(None, [dmi.get("sys_vendor"), dmi.get("product_name")])) or system.get("hostname", "未知主机")
     generated = datetime.now().astimezone().isoformat(timespec="seconds")
     raw_json_size = len(json.dumps(report, ensure_ascii=False))
+    raw_total_count = len(report.get("observations", []))
+    core_latency_raw_count = sum(
+        1 for item in report.get("observations", []) if item.get("group") == "core_latency"
+    )
+    raw_core_toggle = (
+        f'<label class="raw-toggle"><input type="checkbox" id="show-core-latency"> '
+        f'显示核间延迟明细（{core_latency_raw_count} 条）</label>'
+        if core_latency_raw_count else ""
+    )
 
     return f"""<!doctype html>
 <html lang="zh-CN" data-theme="light">
@@ -768,12 +807,13 @@ section{{padding:72px 0;border-bottom:1px solid var(--line);scroll-margin-top:54
 .chart-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:22px}}.chart-grid>*{{min-width:0}}.chart-grid .wide{{grid-column:1/-1;min-width:0}}.chart{{background:var(--panel);border:1px solid var(--line);padding:20px;min-width:0;box-shadow:0 6px 20px rgba(18,35,43,.05)}}.chart-heading{{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:8px}}.chart h3,.inventory-grid h3{{font:700 21px/1.1 var(--serif);margin:0}}.chart svg{{width:100%;height:auto;overflow:visible}}.plot-bg,.bar-track{{fill:color-mix(in srgb,var(--paper-2) 55%,transparent)}}.grid{{stroke:var(--line);stroke-width:1;stroke-dasharray:2 5}}.tick{{stroke:var(--muted)}}.axis,.axis-label,.bar-label,.bar-value{{fill:var(--muted);font:10px var(--mono)}}.axis-label{{font-weight:700;letter-spacing:.08em}}.series-line{{fill:none;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}}.point{{stroke:var(--panel);stroke-width:2;cursor:crosshair}}.bar{{transform-origin:left;animation:grow .8s ease both}}.bar-value{{font-weight:700;fill:var(--ink)}}.legend{{display:flex;gap:12px;flex-wrap:wrap;font:10px var(--mono);color:var(--muted)}}.legend i{{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--swatch);margin-right:4px}}.chart-note{{margin:4px 0 0;color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding-top:12px}}.empty-chart{{min-height:240px;text-align:center}}.empty-mark{{font:60px var(--serif);color:var(--line);margin-top:38px}}.range{{font:11px var(--mono);color:var(--muted)}}
 .topology-map{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}}.node{{border:1px solid var(--line);background:var(--panel);padding:18px}}.node header{{display:grid;grid-template-columns:auto auto 1fr;align-items:baseline;gap:9px;border-bottom:1px solid var(--line);padding-bottom:12px}}.node header span{{font:10px var(--mono);color:var(--signal)}}.node header strong{{font:34px var(--serif)}}.node header small{{text-align:right;color:var(--muted)}}.cores{{display:grid;grid-template-columns:repeat(auto-fill,minmax(70px,1fr));gap:5px;padding-top:12px}}.core{{background:var(--paper-2);padding:7px 9px;display:flex;justify-content:space-between;align-items:center;border-left:2px solid var(--teal)}}.core b{{font:11px var(--mono)}}.core em{{font:9px var(--mono);color:var(--muted);font-style:normal}}
 .heatmap{{border-collapse:separate;border-spacing:5px;width:max(100%,calc((var(--columns) + 1)*76px));min-width:430px}}.heatmap th{{font:10px var(--mono);color:var(--muted);padding:8px;white-space:nowrap}}.heatmap td{{background:var(--cell);min-width:70px;padding:18px 8px;text-align:center;color:#07131b;border-radius:3px}}.heatmap td strong{{display:block;font:700 19px var(--serif)}}.heatmap td small{{font:9px var(--mono)}}.heatmap td.missing{{background:var(--paper-2);color:var(--muted)}}
+.matrix-toolbar{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 0 12px;color:var(--muted);font:10px var(--mono)}}.matrix-toolbar button{{min-width:34px;height:34px;border:1px solid var(--line);border-radius:3px;background:var(--paper-2);color:var(--ink);font:700 15px var(--mono);cursor:pointer}}.matrix-toolbar button:hover,.matrix-toolbar button:focus-visible{{border-color:var(--signal);outline:none}}.matrix-toolbar .text-button{{width:auto;padding:0 11px;font-size:10px}}.matrix-toolbar input[type=range]{{width:min(220px,35vw);accent-color:var(--signal)}}.matrix-toolbar output{{width:42px;color:var(--ink);font-weight:700}}.matrix-toolbar span{{margin-left:auto}}.matrix-viewport{{position:relative;width:100%;height:min(72vh,900px);min-height:260px;overflow:auto;overscroll-behavior:contain;border:1px solid var(--line);background:var(--paper-2);cursor:grab;touch-action:none}}.matrix-viewport:focus-visible{{outline:3px solid color-mix(in srgb,var(--signal) 35%,transparent);outline-offset:2px}}.matrix-viewport.is-dragging{{cursor:grabbing;user-select:none}}.matrix-stage{{position:relative;min-width:1px;min-height:1px}}.zoomable-heatmap .heatmap{{position:absolute;left:0;top:0;transform-origin:top left;margin:0;width:calc((var(--columns) + 1)*76px)}}.zoomable-heatmap .heatmap thead th{{position:sticky;top:0;z-index:2;background:var(--panel)}}.zoomable-heatmap .heatmap tbody th{{position:sticky;left:0;z-index:1;background:var(--panel)}}.zoomable-heatmap .heatmap thead th:first-child{{left:0;z-index:3}}
 .split{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}}.table-scroll{{overflow:auto;max-width:100%}}table{{width:100%}}.data-table{{border-collapse:collapse;background:var(--panel);font-size:13px}}.data-table th{{text-align:left;font:700 10px var(--mono);letter-spacing:.07em;color:var(--muted);background:var(--paper-2);position:sticky;top:0}}.data-table th,.data-table td{{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}}.data-table td small{{display:block;color:var(--muted);max-width:420px}}.data-table .numeric{{font:700 14px var(--mono);white-space:nowrap}}.compact th,.compact td{{padding:9px;font-size:11px}}.mono{{font-family:var(--mono);font-size:10px;word-break:break-all}}.labels{{max-width:460px}}.group-tag{{font:700 9px var(--mono);letter-spacing:.04em;background:var(--paper-2);padding:4px 6px}}.identifier{{font:9px var(--mono);color:var(--muted);margin-top:5px}}
-.filter{{width:100%;border:1px solid var(--line);background:var(--panel);color:var(--ink);font:14px var(--mono);padding:14px 16px;margin-bottom:12px;outline:none}}.filter:focus{{border-color:var(--signal);box-shadow:0 0 0 3px color-mix(in srgb,var(--signal) 18%,transparent)}}
+.raw-tools{{display:grid;grid-template-columns:minmax(260px,1fr) auto auto;align-items:center;gap:12px;margin-bottom:12px}}.filter{{width:100%;border:1px solid var(--line);background:var(--panel);color:var(--ink);font:14px var(--mono);padding:14px 16px;outline:none}}.filter:focus{{border-color:var(--signal);box-shadow:0 0 0 3px color-mix(in srgb,var(--signal) 18%,transparent)}}.raw-toggle{{display:flex;align-items:center;gap:7px;white-space:nowrap;color:var(--ink);font:12px var(--mono);cursor:pointer}}.raw-toggle input{{width:16px;height:16px;accent-color:var(--signal)}}.raw-status{{white-space:nowrap;color:var(--muted);font:10px var(--mono)}}
 .warning-box{{background:var(--dark);color:#ecf2ed;padding:25px;border-left:7px solid var(--signal)}}.warning-box h3{{font:700 24px var(--serif);margin:0 0 10px}}.warning-box li{{margin:8px 0;color:#bccbd0}}.flags{{display:flex;flex-wrap:wrap;gap:5px}}.flags span{{font:9px var(--mono);padding:5px 7px;border:1px solid var(--line);background:var(--panel)}}details{{border:1px solid var(--line);background:var(--panel);padding:16px;margin-top:14px}}summary{{cursor:pointer;font-weight:700}}pre{{white-space:pre-wrap;word-break:break-word;font:10px/1.6 var(--mono);color:var(--muted);max-height:460px;overflow:auto}}
 .coverage{{width:10px;height:10px;border-radius:50%;display:block}}.coverage.yes{{background:#00a67d;box-shadow:0 0 0 3px #00a67d22}}.coverage.no{{background:#8d979b}}footer{{padding:42px 0 70px;display:flex;justify-content:space-between;color:var(--muted);font:11px var(--mono)}}
 .reveal{{animation:reveal .65s ease both}}@keyframes reveal{{from{{opacity:0;transform:translateY(12px)}}to{{opacity:1;transform:none}}}}@keyframes grow{{from{{transform:scaleX(0)}}to{{transform:scaleX(1)}}}}
-@media(max-width:1100px){{.metrics{{grid-template-columns:repeat(3,minmax(0,1fr))}}.masthead{{grid-template-columns:1fr}}}}@media(max-width:760px){{.shell{{width:min(100% - 22px,1500px)}}.masthead{{padding-top:44px}}.section-head,.split,.chart-grid{{grid-template-columns:1fr}}.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.chart-grid .wide{{grid-column:auto}}section{{padding:50px 0}}footer{{display:block}}}}
+@media(max-width:1100px){{.metrics{{grid-template-columns:repeat(3,minmax(0,1fr))}}.masthead{{grid-template-columns:1fr}}}}@media(max-width:760px){{.shell{{width:min(100% - 22px,1500px)}}.masthead{{padding-top:44px}}.section-head,.split,.chart-grid{{grid-template-columns:1fr}}.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.chart-grid .wide{{grid-column:auto}}.matrix-toolbar span{{width:100%;margin-left:0}}.matrix-viewport{{height:65vh;min-height:240px}}.raw-tools{{grid-template-columns:1fr;align-items:start}}section{{padding:50px 0}}footer{{display:block}}}}
 @media print{{.nav,.theme{{display:none}}body{{background:white}}.chart,.metric,.node{{break-inside:avoid;box-shadow:none}}section{{padding:30px 0}}}}
 </style>
 </head>
@@ -824,8 +864,8 @@ section{{padding:72px 0;border-bottom:1px solid var(--line);scroll-margin-top:54
   <details><summary>DMI / 固件身份信息</summary><pre>{_h(json.dumps(dmi, ensure_ascii=False, indent=2))}</pre></details>
   <details><summary>内核漏洞缓解状态</summary><pre>{_h(json.dumps(system.get('environment', {}).get('vulnerabilities', {}), ensure_ascii=False, indent=2))}</pre></details>
 </section>
-<section id="raw"><div class="section-head"><div><div class="section-kicker">07 / 证据台账</div><h2>原始<br>观测数据</h2></div><p class="section-intro">本次运行包含 {len(report.get('observations', []))} 个原始观测点。可按分组、指标、方法或标签搜索；完整 JSON 与 CSV 文件位于本 HTML 报告旁。</p></div>
-  <input class="filter" id="filter" placeholder="筛选：cache_latency、operation=read、cpu_node=1 …" aria-label="筛选原始观测数据">
+<section id="raw"><div class="section-head"><div><div class="section-kicker">07 / 证据台账</div><h2>原始<br>观测数据</h2></div><p class="section-intro">本次运行包含 {raw_total_count} 个原始观测点。核间延迟明细因数量较多而默认隐藏；完整 JSON 与 CSV 文件仍保留所有数据。</p></div>
+  <div class="raw-tools"><input class="filter" id="filter" placeholder="筛选：cache_latency、operation=read、cpu_node=1 …" aria-label="筛选原始观测数据">{raw_core_toggle}<output class="raw-status" id="raw-status" aria-live="polite">当前显示 {raw_total_count - core_latency_raw_count} / 总计 {raw_total_count} 条</output></div>
   <div class="table-scroll"><table class="data-table" id="raw-table"><thead><tr><th>分组</th><th>指标 / 方法</th><th>数值</th><th>置信度</th><th>标签</th></tr></thead><tbody>{_raw_table(report)}</tbody></table></div>
 </section>
 <section id="method"><div class="section-head"><div><div class="section-kicker">08 / 结论边界</div><h2>方法与<br>限制</h2></div><p class="section-intro">黑盒表征并非真正对芯片开盖，它回答的是当前软件环境能够观测到什么。频率、固件、内核策略、虚拟化、温度、页面迁移和编译器行为均属于实验条件。</p></div>
@@ -840,7 +880,70 @@ section{{padding:72px 0;border-bottom:1px solid var(--line);scroll-margin-top:54
 <script>
 const root=document.documentElement,button=document.getElementById('theme');
 button.addEventListener('click',()=>{{root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';}});
-const filter=document.getElementById('filter');
-filter.addEventListener('input',()=>{{const query=filter.value.toLowerCase().trim();document.querySelectorAll('#raw-table tbody tr').forEach(row=>{{row.hidden=query&&!row.dataset.search.includes(query)}});}});
+document.querySelectorAll('[data-matrix-viewer]').forEach(viewport=>{{
+  const stage=viewport.querySelector('.matrix-stage'),table=stage.querySelector('.heatmap');
+  const toolbar=viewport.previousElementSibling,range=toolbar.querySelector('[data-zoom-range]');
+  const output=toolbar.querySelector('[data-zoom-output]');
+  const minimum=Number(range.min)/100,maximum=Number(range.max)/100;
+  const naturalWidth=table.offsetWidth,naturalHeight=table.offsetHeight;
+  let scale=1,dragging=false,fitted=true,startX=0,startY=0,startLeft=0,startTop=0;
+  const clamp=value=>Math.min(maximum,Math.max(minimum,value));
+  const fitScale=()=>clamp(Math.min(1,viewport.clientWidth/naturalWidth,viewport.clientHeight/naturalHeight));
+  const renderScale=(next,anchor)=>{{
+    const previous=scale;scale=clamp(next);
+    table.style.transform=`scale(${{scale}})`;
+    stage.style.width=`${{naturalWidth*scale}}px`;
+    stage.style.height=`${{naturalHeight*scale}}px`;
+    const percent=scale*100;
+    range.value=String(Math.round(percent));output.value=`${{percent<10?percent.toFixed(1):Math.round(percent)}}%`;
+    if(anchor){{
+      const localX=anchor.clientX-anchor.rect.left,localY=anchor.clientY-anchor.rect.top;
+      const contentX=(viewport.scrollLeft+localX)/previous;
+      const contentY=(viewport.scrollTop+localY)/previous;
+      viewport.scrollLeft=contentX*scale-localX;viewport.scrollTop=contentY*scale-localY;
+    }}
+  }};
+  toolbar.addEventListener('click',event=>{{
+    const action=event.target.closest('[data-zoom-action]')?.dataset.zoomAction;
+    if(!action)return;
+    if(action==='in'){{fitted=false;renderScale(Math.max(scale*1.2,scale+0.01));}}
+    if(action==='out'){{fitted=false;renderScale(Math.min(scale/1.2,scale-0.01));}}
+    if(action==='actual'){{fitted=false;renderScale(1);}}
+    if(action==='fit'){{fitted=true;viewport.scrollTo(0,0);renderScale(fitScale());}}
+  }});
+  range.addEventListener('input',()=>{{fitted=false;renderScale(Number(range.value)/100);}});
+  viewport.addEventListener('wheel',event=>{{
+    if(!(event.ctrlKey||event.metaKey))return;
+    event.preventDefault();fitted=false;
+    renderScale(scale*(event.deltaY<0?1.12:1/1.12),{{clientX:event.clientX,clientY:event.clientY,rect:viewport.getBoundingClientRect()}});
+  }},{{passive:false}});
+  viewport.addEventListener('pointerdown',event=>{{
+    if(event.button!==0)return;dragging=true;startX=event.clientX;startY=event.clientY;
+    startLeft=viewport.scrollLeft;startTop=viewport.scrollTop;viewport.classList.add('is-dragging');
+    viewport.setPointerCapture(event.pointerId);
+  }});
+  viewport.addEventListener('pointermove',event=>{{
+    if(!dragging)return;viewport.scrollLeft=startLeft-(event.clientX-startX);viewport.scrollTop=startTop-(event.clientY-startY);
+  }});
+  const stopDragging=event=>{{
+    if(!dragging)return;dragging=false;viewport.classList.remove('is-dragging');
+    if(viewport.hasPointerCapture(event.pointerId))viewport.releasePointerCapture(event.pointerId);
+  }};
+  viewport.addEventListener('pointerup',stopDragging);viewport.addEventListener('pointercancel',stopDragging);
+  renderScale(fitScale());
+  if('ResizeObserver' in window)new ResizeObserver(()=>{{if(fitted)renderScale(fitScale());}}).observe(viewport);
+}});
+const filter=document.getElementById('filter'),showCoreLatency=document.getElementById('show-core-latency');
+const rawRows=[...document.querySelectorAll('#raw-table tbody tr')],rawStatus=document.getElementById('raw-status');
+const filterRawRows=()=>{{
+  const query=filter.value.toLowerCase().trim();let visible=0;
+  rawRows.forEach(row=>{{
+    const defaultHidden=row.dataset.defaultHidden==='true'&&!showCoreLatency?.checked;
+    const searchHidden=Boolean(query)&&!row.dataset.search.includes(query);
+    row.hidden=defaultHidden||searchHidden;if(!row.hidden)visible+=1;
+  }});
+  rawStatus.value=`当前显示 ${{visible}} / 总计 ${{rawRows.length}} 条`;
+}};
+filter.addEventListener('input',filterRawRows);showCoreLatency?.addEventListener('change',filterRawRows);filterRawRows();
 </script>
 </body></html>"""
