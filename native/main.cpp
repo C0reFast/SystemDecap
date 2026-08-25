@@ -293,9 +293,11 @@ long perf_event_open(perf_event_attr *event, pid_t pid, int cpu, int group_fd,
   return syscall(SYS_perf_event_open, event, pid, cpu, group_fd, flags);
 }
 
+enum class PerfGroupKind { Core, Branch, Cache };
+
 class PerfGroup {
  public:
-  PerfGroup() { open(); }
+  explicit PerfGroup(PerfGroupKind kind = PerfGroupKind::Core) : kind_(kind) { open(); }
   PerfGroup(const PerfGroup &) = delete;
   PerfGroup &operator=(const PerfGroup &) = delete;
   ~PerfGroup() {
@@ -306,35 +308,57 @@ class PerfGroup {
     }
   }
 
-  bool available() const { return leader_ >= 0 && event_names_.size() >= 2; }
+  bool available() const { return leader_ >= 0 && event_names_.size() == 2; }
   const std::string &error() const { return error_; }
 
-  void start() const {
+  bool start() {
     if (!available()) {
-      return;
+      return false;
     }
-    ioctl(leader_, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
-    ioctl(leader_, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
+    if (ioctl(leader_, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP) != 0) {
+      error_ = "PERF_EVENT_IOC_RESET 失败：" + std::string(std::strerror(errno));
+      return false;
+    }
+    if (ioctl(leader_, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP) != 0) {
+      error_ = "PERF_EVENT_IOC_ENABLE 失败：" + std::string(std::strerror(errno));
+      return false;
+    }
+    started_ = true;
+    return true;
   }
 
-  PerfCounts stop() const {
+  PerfCounts stop() {
     PerfCounts counts;
-    if (!available()) {
+    if (!available() || !started_) {
       counts.error = error_;
       return counts;
     }
-    ioctl(leader_, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP);
+    started_ = false;
+    if (ioctl(leader_, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP) != 0) {
+      error_ = "PERF_EVENT_IOC_DISABLE 失败：" + std::string(std::strerror(errno));
+      counts.error = error_;
+      return counts;
+    }
     std::vector<std::uint64_t> buffer(3 + event_names_.size());
     const auto bytes = read(leader_, buffer.data(), buffer.size() * sizeof(std::uint64_t));
     if (bytes < static_cast<ssize_t>((3 + event_names_.size()) * sizeof(std::uint64_t))) {
-      counts.error = "short read from perf_event group";
+      error_ = bytes < 0
+          ? "读取 perf_event 组失败：" + std::string(std::strerror(errno))
+          : "读取 perf_event 组长度不足";
+      counts.error = error_;
       return counts;
     }
     const auto nr = buffer[0];
     const double enabled = static_cast<double>(buffer[1]);
     const double running = static_cast<double>(buffer[2]);
-    if (nr != event_names_.size() || running <= 0.0) {
-      counts.error = "invalid perf_event group result";
+    if (nr != event_names_.size()) {
+      error_ = "perf_event 返回的事件数量不匹配";
+      counts.error = error_;
+      return counts;
+    }
+    if (running <= 0.0) {
+      error_ = "time_running 为 0（事件无法调度）";
+      counts.error = error_;
       return counts;
     }
     const double scale = enabled / running;
@@ -362,21 +386,25 @@ class PerfGroup {
   std::vector<int> fds_;
   std::string error_;
   std::vector<std::string> event_names_;
+  PerfGroupKind kind_ = PerfGroupKind::Core;
+  bool started_ = false;
 
   void open() {
     struct EventSpec {
       const char *name;
       std::uint64_t config;
-      bool required;
     };
-    const std::vector<EventSpec> specs = {
-        {"cycles", PERF_COUNT_HW_CPU_CYCLES, true},
-        {"instructions", PERF_COUNT_HW_INSTRUCTIONS, true},
-        {"branches", PERF_COUNT_HW_BRANCH_INSTRUCTIONS, false},
-        {"branch_misses", PERF_COUNT_HW_BRANCH_MISSES, false},
-        {"cache_references", PERF_COUNT_HW_CACHE_REFERENCES, false},
-        {"cache_misses", PERF_COUNT_HW_CACHE_MISSES, false},
-    };
+    std::vector<EventSpec> specs;
+    if (kind_ == PerfGroupKind::Core) {
+      specs = {{"cycles", PERF_COUNT_HW_CPU_CYCLES},
+               {"instructions", PERF_COUNT_HW_INSTRUCTIONS}};
+    } else if (kind_ == PerfGroupKind::Branch) {
+      specs = {{"branches", PERF_COUNT_HW_BRANCH_INSTRUCTIONS},
+               {"branch_misses", PERF_COUNT_HW_BRANCH_MISSES}};
+    } else {
+      specs = {{"cache_references", PERF_COUNT_HW_CACHE_REFERENCES},
+               {"cache_misses", PERF_COUNT_HW_CACHE_MISSES}};
+    }
     for (const auto &spec : specs) {
       perf_event_attr event{};
       event.type = PERF_TYPE_HARDWARE;
@@ -389,15 +417,13 @@ class PerfGroup {
                           PERF_FORMAT_TOTAL_TIME_RUNNING;
       const int fd = static_cast<int>(perf_event_open(&event, 0, -1, leader_, 0));
       if (fd < 0) {
-        if (spec.required) {
-          error_ = std::string("perf_event_open ") + spec.name + ": " + std::strerror(errno);
-          for (const int old_fd : fds_) close(old_fd);
-          fds_.clear();
-          event_names_.clear();
-          leader_ = -1;
-          return;
-        }
-        continue;
+        error_ = std::string("perf_event_open(") + spec.name + ") 失败：" +
+                 std::strerror(errno);
+        for (const int old_fd : fds_) close(old_fd);
+        fds_.clear();
+        event_names_.clear();
+        leader_ = -1;
+        return;
       }
       if (fds_.empty()) {
         leader_ = fd;
@@ -407,6 +433,33 @@ class PerfGroup {
     }
   }
 };
+
+struct PerfProbeStatus {
+  bool available = false;
+  std::string error;
+};
+
+struct PerfEnvironment {
+  PerfProbeStatus core;
+  PerfProbeStatus branch;
+  PerfProbeStatus cache;
+  std::string perf_event_paranoid;
+  std::string nmi_watchdog;
+};
+
+PerfProbeStatus probe_perf_group(PerfGroupKind kind) {
+  PerfGroup group(kind);
+  if (!group.available()) return {false, group.error()};
+  if (!group.start()) return {false, group.error()};
+  std::uint64_t value = 1;
+  for (std::uint64_t index = 0; index < 100000; ++index) {
+    value = value * 3 + index;
+    asm volatile("" : "+r"(value) :: "memory");
+  }
+  global_sink = global_sink ^ value;
+  const auto counts = group.stop();
+  return {counts.available, counts.available ? std::string{} : counts.error};
+}
 
 std::string escape_json(std::string_view value) {
   std::ostringstream output;
@@ -446,16 +499,29 @@ void add_observation(std::vector<Observation> &observations, std::string group,
   }
 }
 
+void add_warning_once(std::vector<std::string> &warnings, std::string warning) {
+  if (std::find(warnings.begin(), warnings.end(), warning) == warnings.end())
+    warnings.push_back(std::move(warning));
+}
+
 void emit_json(const Options &options, const std::vector<Observation> &observations,
-               const std::vector<std::string> &warnings, bool perf_available,
-               const std::string &perf_error, double runtime_seconds) {
+               const std::vector<std::string> &warnings, const PerfEnvironment &perf,
+               double runtime_seconds) {
   std::cout << "{\n\"schema_version\":\"1.0\",\n\"metadata\":{";
   emit_string(std::cout, "architecture", architecture_name());
   emit_string(std::cout, "platform_family", platform_family());
   emit_string(std::cout, "profile", options.profile);
   std::cout << "\"seed\":" << options.seed << ",\"perf_available\":"
-            << (perf_available ? "true" : "false") << ',';
-  emit_string(std::cout, "perf_error", perf_error);
+            << (perf.core.available ? "true" : "false") << ',';
+  emit_string(std::cout, "perf_error", perf.core.error);
+  std::cout << "\"pmu_core_available\":" << (perf.core.available ? "true" : "false") << ',';
+  emit_string(std::cout, "pmu_core_error", perf.core.error);
+  std::cout << "\"pmu_branch_available\":" << (perf.branch.available ? "true" : "false") << ',';
+  emit_string(std::cout, "pmu_branch_error", perf.branch.error);
+  std::cout << "\"pmu_cache_available\":" << (perf.cache.available ? "true" : "false") << ',';
+  emit_string(std::cout, "pmu_cache_error", perf.cache.error);
+  emit_string(std::cout, "perf_event_paranoid", perf.perf_event_paranoid);
+  emit_string(std::cout, "nmi_watchdog", perf.nmi_watchdog);
   std::cout << "\"requested_memory_mib\":" << options.memory_mib
             << ",\"memory_size_explicit\":" << (options.memory_explicit ? "true" : "false")
             << ",\"duration_ms\":" << options.duration_ms
@@ -504,7 +570,12 @@ class MappedBuffer {
 #endif
 #ifdef MADV_NOHUGEPAGE
     if (advice == HugePageAdvice::AvoidHuge) {
-      madvise(data_, bytes_, MADV_NOHUGEPAGE);
+      if (madvise(data_, bytes_, MADV_NOHUGEPAGE) != 0) {
+        const std::string error = std::strerror(errno);
+        munmap(data_, bytes_);
+        data_ = nullptr;
+        throw std::runtime_error("MADV_NOHUGEPAGE failed: " + error);
+      }
     }
 #endif
   }
@@ -591,18 +662,65 @@ std::size_t parse_size_bytes(const std::string &text) {
   }
 }
 
-std::size_t last_level_cache_bytes(int cpu) {
-  const auto root = std::filesystem::path("/sys/devices/system/cpu") /
-                    ("cpu" + std::to_string(cpu)) / "cache";
-  std::size_t largest = 0;
-  std::error_code error;
-  for (const auto &entry : std::filesystem::directory_iterator(root, error)) {
-    if (entry.path().filename().string().rfind("index", 0) != 0) continue;
-    const auto type = read_file(entry.path() / "type");
-    if (type == "Unified" || type == "Data")
-      largest = std::max(largest, parse_size_bytes(read_file(entry.path() / "size")));
+struct CacheInstance {
+  int level = 0;
+  std::size_t bytes = 0;
+  std::vector<int> shared_cpus;
+};
+
+std::vector<CacheInstance> unique_data_cache_instances(const std::vector<int> &cpus) {
+  std::map<std::string, CacheInstance> unique;
+  for (const int cpu : cpus) {
+    const auto root = std::filesystem::path("/sys/devices/system/cpu") /
+                      ("cpu" + std::to_string(cpu)) / "cache";
+    std::error_code error;
+    for (const auto &entry : std::filesystem::directory_iterator(root, error)) {
+      if (entry.path().filename().string().rfind("index", 0) != 0) continue;
+      const auto type = read_file(entry.path() / "type");
+      if (type != "Unified" && type != "Data") continue;
+      const int level = read_int(entry.path() / "level");
+      const std::size_t bytes = parse_size_bytes(read_file(entry.path() / "size"));
+      auto shared = parse_cpu_list(read_file(entry.path() / "shared_cpu_list"));
+      if (shared.empty()) shared.push_back(cpu);
+      std::ostringstream key;
+      key << level << ':' << type << ':' << bytes << ':';
+      for (const int shared_cpu : shared) key << shared_cpu << ',';
+      unique.emplace(key.str(), CacheInstance{level, bytes, std::move(shared)});
+    }
   }
-  return largest;
+  std::vector<CacheInstance> result;
+  result.reserve(unique.size());
+  for (auto &[key, cache] : unique) {
+    (void)key;
+    result.push_back(std::move(cache));
+  }
+  return result;
+}
+
+std::size_t aggregate_last_level_cache_bytes(const std::vector<int> &cpus) {
+  const auto caches = unique_data_cache_instances(cpus);
+  int last_level = 0;
+  for (const auto &cache : caches) last_level = std::max(last_level, cache.level);
+  std::size_t total = 0;
+  for (const auto &cache : caches) {
+    if (cache.level == last_level) total += cache.bytes;
+  }
+  return total;
+}
+
+std::size_t last_level_cache_bytes(int cpu) {
+  return aggregate_last_level_cache_bytes({cpu});
+}
+
+std::size_t memory_available_bytes() {
+  std::ifstream input("/proc/meminfo");
+  std::string key;
+  std::size_t kib = 0;
+  std::string unit;
+  while (input >> key >> kib >> unit) {
+    if (key == "MemAvailable:") return kib * 1024ULL;
+  }
+  return 0;
 }
 
 void benchmark_timers(std::vector<Observation> &observations, int cpu) {
@@ -679,6 +797,22 @@ void build_random_chain(std::byte *base, std::size_t bytes, std::size_t stride,
   }
 }
 
+void build_random_page_chain(std::byte *base, std::size_t pages,
+                             std::size_t page_size, std::mt19937 &random) {
+  const std::size_t cache_line = 64;
+  const std::size_t set_spread = std::max<std::size_t>(1, page_size / cache_line);
+  std::vector<std::uint32_t> addresses(pages);
+  for (std::size_t page = 0; page < pages; ++page) {
+    const std::size_t offset = (page % set_spread) * cache_line;
+    addresses[page] = static_cast<std::uint32_t>(page * page_size + offset);
+  }
+  std::shuffle(addresses.begin(), addresses.end(), random);
+  for (std::size_t index = 0; index < addresses.size(); ++index) {
+    *reinterpret_cast<std::uint32_t *>(base + addresses[index]) =
+        addresses[(index + 1) % addresses.size()];
+  }
+}
+
 void benchmark_cache_latency(const Options &options, std::vector<Observation> &observations,
                              std::vector<std::string> &warnings, int cpu) {
   pin_to_cpu(cpu);
@@ -728,8 +862,8 @@ void benchmark_tlb(const Options &options, std::vector<Observation> &observation
   try {
     for (const auto pages : power_sizes(2, last_pages)) {
       const std::size_t bytes = pages * page_size;
-      MappedBuffer buffer(bytes);
-      build_random_chain(buffer.bytes(), bytes, page_size, random);
+      MappedBuffer buffer(bytes, HugePageAdvice::AvoidHuge);
+      build_random_page_chain(buffer.bytes(), pages, page_size, random);
       const std::size_t iterations = std::clamp<std::size_t>(pages * 64, 100000, 3000000);
       (void)chase_chain(buffer.bytes(), std::min<std::size_t>(iterations, pages * 2));
       const int samples = options.profile == "smoke" ? 1 : options.profile == "quick" ? 3 : 5;
@@ -742,6 +876,8 @@ void benchmark_tlb(const Options &options, std::vector<Observation> &observation
                       {{"cpu", std::to_string(cpu)},
                        {"pages", std::to_string(pages)},
                        {"page_bytes", std::to_string(page_size)},
+                       {"cache_set_spread", std::to_string(page_size / 64)},
+                       {"page_policy", "base-page-advised"},
                        {"working_set_bytes", std::to_string(bytes)}});
     }
   } catch (const std::exception &error) {
@@ -750,6 +886,16 @@ void benchmark_tlb(const Options &options, std::vector<Observation> &observation
 }
 
 enum class StreamOperation { Read, Write, Copy, Triad };
+
+std::size_t stream_array_count(StreamOperation operation) {
+  switch (operation) {
+    case StreamOperation::Read:
+    case StreamOperation::Write: return 1;
+    case StreamOperation::Copy: return 2;
+    case StreamOperation::Triad: return 3;
+  }
+  return 1;
+}
 
 std::string stream_name(StreamOperation operation) {
   switch (operation) {
@@ -891,12 +1037,36 @@ void benchmark_bandwidth(const Options &options, const std::vector<CpuInfo> &cpu
       : options.profile == "quick" ? std::min<std::size_t>(physical.size(), 8)
       : physical.size();
   const std::size_t requested_bytes = options.memory_mib * 1024U * 1024U;
-  const std::size_t llc = last_level_cache_bytes(physical.front().cpu);
+  std::vector<int> physical_ids;
+  physical_ids.reserve(physical.size());
+  for (const auto &cpu : physical) physical_ids.push_back(cpu.cpu);
+  const std::size_t aggregate_llc = aggregate_last_level_cache_bytes(physical_ids);
   const std::size_t automatic_cap = options.profile == "quick" ? 512ULL * 1024ULL * 1024ULL
       : options.profile == "deep" ? 4ULL * 1024ULL * 1024ULL * 1024ULL
                                   : 2ULL * 1024ULL * 1024ULL * 1024ULL;
-  const std::size_t bytes = options.memory_explicit
-      ? requested_bytes : std::min(automatic_cap, std::max(requested_bytes, llc * 2));
+  const std::size_t available = memory_available_bytes();
+  const std::size_t safe_per_array = available > 0 ? available / 6 : automatic_cap;
+  const std::size_t desired_bytes = options.memory_explicit
+      ? requested_bytes : std::max(requested_bytes, aggregate_llc * 2);
+  const std::size_t bytes = std::max<std::size_t>(4096,
+      std::min(desired_bytes, options.memory_explicit
+          ? safe_per_array : std::min(automatic_cap, safe_per_array)));
+  const bool read_working_set_exceeds_llc =
+      aggregate_llc > 0 && bytes >= aggregate_llc * 2;
+  if (!read_working_set_exceeds_llc) {
+    warnings.push_back(
+        "内存带宽工作集未达到整机 LLC 的 2 倍；结果可能包含缓存带宽，已降低置信度"
+        "（工作集=" + std::to_string(bytes) + " 字节，整机 LLC=" +
+        std::to_string(aggregate_llc) + " 字节）");
+  }
+  if (bytes < desired_bytes) {
+    warnings.push_back("内存带宽工作集受" + std::string(
+                           options.memory_explicit ? "MemAvailable 安全预算" :
+                                                     "档位上限或 MemAvailable 安全预算") +
+                       "限制：期望 " +
+                       std::to_string(desired_bytes) + " 字节，实际 " +
+                       std::to_string(bytes) + " 字节/数组");
+  }
   const std::vector<StreamOperation> operations = options.profile == "smoke"
       ? std::vector<StreamOperation>{StreamOperation::Read}
       : std::vector<StreamOperation>{StreamOperation::Read, StreamOperation::Write,
@@ -907,12 +1077,18 @@ void benchmark_bandwidth(const Options &options, const std::vector<CpuInfo> &cpu
         std::vector<int> selected;
         for (std::size_t index = 0; index < count; ++index) selected.push_back(physical[index].cpu);
         const auto result = run_stream(operation, selected, bytes, options.duration_ms);
+        const std::size_t working_set = bytes * stream_array_count(operation);
+        const bool exceeds_llc = aggregate_llc > 0 && working_set >= aggregate_llc * 2;
         add_observation(observations, "memory_bandwidth", "stream_bandwidth",
-                        result.gigabytes_per_second, "GB/s", "high",
+                        result.gigabytes_per_second, "GB/s", exceeds_llc ? "high" : "low",
                         "parallel pinned streaming kernel; payload bytes",
                         {{"operation", stream_name(operation)},
                          {"threads", std::to_string(count)},
                          {"bytes_per_array", std::to_string(bytes)},
+                         {"working_set_bytes", std::to_string(working_set)},
+                         {"aggregate_llc_bytes", std::to_string(aggregate_llc)},
+                         {"bytes_per_thread", std::to_string(working_set / count)},
+                         {"working_set_exceeds_llc", exceeds_llc ? "true" : "false"},
                          {"cpu_scope", "physical-cores"}});
       }
     }
@@ -1312,7 +1488,31 @@ std::string cpu_relation(const CpuInfo &left, const CpuInfo &right) {
     return "smt-sibling";
   }
   if (left.node == right.node) {
-    return "same-numa-different-core";
+    static std::map<int, std::vector<int>> llc_siblings_by_cpu;
+    auto llc_siblings = [&](int cpu) -> const std::vector<int> & {
+      const auto found = llc_siblings_by_cpu.find(cpu);
+      if (found != llc_siblings_by_cpu.end()) return found->second;
+      std::vector<int> siblings;
+      int highest_level = -1;
+      const auto root = std::filesystem::path("/sys/devices/system/cpu") /
+                        ("cpu" + std::to_string(cpu)) / "cache";
+      std::error_code error;
+      for (const auto &entry : std::filesystem::directory_iterator(root, error)) {
+        if (entry.path().filename().string().rfind("index", 0) != 0) continue;
+        const auto type = read_file(entry.path() / "type");
+        if (type != "Unified" && type != "Data") continue;
+        const int level = read_int(entry.path() / "level");
+        if (level >= highest_level) {
+          highest_level = level;
+          siblings = parse_cpu_list(read_file(entry.path() / "shared_cpu_list"));
+        }
+      }
+      return llc_siblings_by_cpu.emplace(cpu, std::move(siblings)).first->second;
+    };
+    const auto &shared = llc_siblings(left.cpu);
+    if (std::binary_search(shared.begin(), shared.end(), right.cpu))
+      return "same-llc-different-core";
+    return "cross-llc-same-numa";
   }
   if (left.socket == right.socket) {
     return "cross-numa-same-socket";
@@ -1548,11 +1748,38 @@ void benchmark_numa(const Options &options, const std::vector<CpuInfo> &cpus,
   }
   if (by_node.size() < 2)
     warnings.push_back("跨 NUMA 路径不可用：可访问 NUMA 节点不足两个；仍测量本地对角线");
-  const std::size_t llc = last_level_cache_bytes(cpus.front().cpu);
   const std::size_t base_bytes = (options.profile == "quick" ? 64U : 256U) * 1024U * 1024U;
   const std::size_t numa_cap = options.profile == "quick" ? 512ULL * 1024ULL * 1024ULL
                                                          : 2ULL * 1024ULL * 1024ULL * 1024ULL;
-  const std::size_t bytes = std::min(numa_cap, std::max(base_bytes, llc * 2));
+  std::map<int, std::size_t> node_llc_bytes;
+  std::size_t largest_node_llc = 0;
+  for (const auto &[node, node_cpus] : by_node) {
+    std::vector<int> ids;
+    for (const auto &cpu : node_cpus) ids.push_back(cpu.cpu);
+    node_llc_bytes[node] = aggregate_last_level_cache_bytes(ids);
+    largest_node_llc = std::max(largest_node_llc, node_llc_bytes[node]);
+  }
+  const std::size_t requested_bytes = options.memory_mib * 1024U * 1024U;
+  const std::size_t desired_bytes = options.memory_explicit
+      ? requested_bytes : std::max(base_bytes, largest_node_llc * 2);
+  const std::size_t available = memory_available_bytes();
+  const std::size_t safe_bytes = available > 0 ? available / 3 : numa_cap;
+  const std::size_t bytes = std::max<std::size_t>(4096,
+      std::min(desired_bytes, options.memory_explicit
+          ? safe_bytes : std::min(numa_cap, safe_bytes)));
+  if (bytes < desired_bytes) {
+    warnings.push_back("NUMA 工作集受" + std::string(
+                           options.memory_explicit ? "MemAvailable 安全预算" :
+                                                     "档位上限或 MemAvailable 安全预算") +
+                       "限制：期望 " + std::to_string(desired_bytes) + " 字节，实际 " +
+                       std::to_string(bytes) + " 字节");
+  }
+  if (largest_node_llc == 0 || bytes < largest_node_llc * 2) {
+    warnings.push_back(
+        "NUMA 带宽工作集未确认达到读取节点 LLC 的 2 倍；远端带宽可能包含缓存复用，已降低置信度"
+        "（工作集=" + std::to_string(bytes) + " 字节，最大节点 LLC=" +
+        std::to_string(largest_node_llc) + " 字节）");
+  }
   std::mt19937 random(options.seed ^ 0x4E554D41U);
   bool warned_bind = false;
   for (const auto &[memory_node, memory_cpus] : by_node) {
@@ -1572,9 +1799,16 @@ void benchmark_numa(const Options &options, const std::vector<CpuInfo> &cpus,
         const std::size_t iterations = options.profile == "quick" ? 300000 : 1000000;
         (void)chase_chain(buffer.bytes(), 10000);
         const double latency = chase_chain(buffer.bytes(), iterations);
+        const int memory_socket = memory_cpus.front().socket;
+        const int cpu_socket = destination_cpus.front().socket;
+        const std::string relation = memory_node == cpu_node ? "local"
+            : memory_socket == cpu_socket ? "cross-numa-same-socket" : "cross-socket";
         const Labels labels = {
             {"memory_node", std::to_string(memory_node)},
             {"cpu_node", std::to_string(cpu_node)},
+            {"memory_socket", std::to_string(memory_socket)},
+            {"cpu_socket", std::to_string(cpu_socket)},
+            {"relation", relation},
             {"local", memory_node == cpu_node ? "true" : "false"},
             {"placement", bound ? "mbind" : "pinned-first-touch"}};
         add_observation(observations, "numa", "load_latency", latency, "ns/access",
@@ -1593,9 +1827,16 @@ void benchmark_numa(const Options &options, const std::vector<CpuInfo> &cpus,
           selected.push_back(destination_cpus[index].cpu);
         const double bandwidth = read_existing(values, elements, selected, options.duration_ms);
         auto bandwidth_labels = labels;
+        const std::size_t reader_llc = node_llc_bytes[cpu_node];
+        const bool exceeds_llc = reader_llc > 0 && bytes >= reader_llc * 2;
         bandwidth_labels["threads"] = std::to_string(selected.size());
+        bandwidth_labels["working_set_bytes"] = std::to_string(bytes);
+        bandwidth_labels["reader_node_llc_bytes"] = std::to_string(reader_llc);
+        bandwidth_labels["bytes_per_thread"] = std::to_string(bytes / selected.size());
+        bandwidth_labels["working_set_exceeds_llc"] = exceeds_llc ? "true" : "false";
         add_observation(observations, "numa", "read_bandwidth", bandwidth, "GB/s",
-                        bound ? "high" : "medium", "pinned NUMA aggregate read payload",
+                        exceeds_llc ? (bound ? "high" : "medium") : "low",
+                        "pinned NUMA aggregate read payload with LLC coverage metadata",
                         bandwidth_labels);
       }
     } catch (const std::exception &error) {
@@ -1614,14 +1855,30 @@ struct KernelMeasurement {
 template <typename Function>
 KernelMeasurement measure_kernel(Function &&function) {
   function();
-  PerfGroup perf;
+  PerfGroup core(PerfGroupKind::Core);
+  PerfGroup branch(PerfGroupKind::Branch);
+  PerfGroup cache(PerfGroupKind::Cache);
   const auto wall_begin = Clock::now();
   const auto tick_begin = cycle_counter();
-  perf.start();
+  core.start();
+  branch.start();
+  cache.start();
   function();
-  auto counts = perf.stop();
+  auto cache_counts = cache.stop();
+  auto branch_counts = branch.stop();
+  auto counts = core.stop();
   const auto tick_end = cycle_counter();
   const auto wall_end = Clock::now();
+  if (branch_counts.available && branch_counts.branch_counters_available) {
+    counts.branch_counters_available = true;
+    counts.branches = branch_counts.branches;
+    counts.branch_misses = branch_counts.branch_misses;
+  }
+  if (cache_counts.available && cache_counts.cache_counters_available) {
+    counts.cache_counters_available = true;
+    counts.cache_references = cache_counts.cache_references;
+    counts.cache_misses = cache_counts.cache_misses;
+  }
   return {seconds_between(wall_begin, wall_end), tick_end - tick_begin, std::move(counts)};
 }
 
@@ -1816,6 +2073,7 @@ void fp_multiply_four_chains(std::size_t iterations) {
 
 void record_kernel(std::vector<Observation> &observations, const std::string &name,
                    std::size_t operations, const KernelMeasurement &measurement,
+                   std::vector<std::string> &warnings,
                    const Labels &extra_labels = {}) {
   const double ops = static_cast<double>(operations);
   Labels labels = extra_labels;
@@ -1843,45 +2101,48 @@ void record_kernel(std::vector<Observation> &observations, const std::string &na
                       100.0 * measurement.perf.cache_misses / measurement.perf.cache_references,
                       "%", "medium", "generic perf cache misses/references", labels);
     }
+  } else if (!measurement.perf.error.empty()) {
+    add_warning_once(warnings, "核心流水线 PMU 测量失败：" + measurement.perf.error +
+                               "；IPC、每周期吞吐与周期延迟已标记为不可用");
   }
 }
 
 void benchmark_pipeline(const Options &options, std::vector<Observation> &observations,
-                        int cpu) {
+                        std::vector<std::string> &warnings, int cpu) {
   pin_to_cpu(cpu);
   const std::size_t iterations = options.profile == "smoke" ? 2000
       : options.profile == "quick" ? 100000
       : options.profile == "deep" ? 2000000
                                   : 500000;
   auto nops = measure_kernel([&] { nop_kernel(iterations); });
-  record_kernel(observations, "nop_frontend", iterations * 128, nops,
+  record_kernel(observations, "nop_frontend", iterations * 128, nops, warnings,
                 {{"chains", "n/a"}, {"bound", "frontend"}});
   auto add1 = measure_kernel([&] { add_one_chain(iterations); });
-  record_kernel(observations, "integer_add_dependency", iterations * 64, add1,
+  record_kernel(observations, "integer_add_dependency", iterations * 64, add1, warnings,
                 {{"chains", "1"}, {"bound", "dependency"}});
   auto add4 = measure_kernel([&] { add_four_chains(iterations); });
-  record_kernel(observations, "integer_add_parallel4", iterations * 64, add4,
+  record_kernel(observations, "integer_add_parallel4", iterations * 64, add4, warnings,
                 {{"chains", "4"}, {"bound", "backend"}});
   auto add8 = measure_kernel([&] { add_eight_chains(iterations); });
-  record_kernel(observations, "integer_add_parallel8", iterations * 64, add8,
+  record_kernel(observations, "integer_add_parallel8", iterations * 64, add8, warnings,
                 {{"chains", "8"}, {"bound", "backend"}});
   auto mul1 = measure_kernel([&] { multiply_one_chain(iterations); });
-  record_kernel(observations, "integer_mul_dependency", iterations * 32, mul1,
+  record_kernel(observations, "integer_mul_dependency", iterations * 32, mul1, warnings,
                 {{"chains", "1"}, {"bound", "dependency"}});
   auto mul4 = measure_kernel([&] { multiply_four_chains(iterations); });
-  record_kernel(observations, "integer_mul_parallel4", iterations * 32, mul4,
+  record_kernel(observations, "integer_mul_parallel4", iterations * 32, mul4, warnings,
                 {{"chains", "4"}, {"bound", "backend"}});
   auto fp_add1 = measure_kernel([&] { fp_add_one_chain(iterations); });
-  record_kernel(observations, "fp64_add_dependency", iterations * 32, fp_add1,
+  record_kernel(observations, "fp64_add_dependency", iterations * 32, fp_add1, warnings,
                 {{"chains", "1"}, {"bound", "dependency"}, {"class", "floating-point"}});
   auto fp_add4 = measure_kernel([&] { fp_add_four_chains(iterations); });
-  record_kernel(observations, "fp64_add_parallel4", iterations * 32, fp_add4,
+  record_kernel(observations, "fp64_add_parallel4", iterations * 32, fp_add4, warnings,
                 {{"chains", "4"}, {"bound", "backend"}, {"class", "floating-point"}});
   auto fp_mul1 = measure_kernel([&] { fp_multiply_one_chain(iterations); });
-  record_kernel(observations, "fp64_mul_dependency", iterations * 16, fp_mul1,
+  record_kernel(observations, "fp64_mul_dependency", iterations * 16, fp_mul1, warnings,
                 {{"chains", "1"}, {"bound", "dependency"}, {"class", "floating-point"}});
   auto fp_mul4 = measure_kernel([&] { fp_multiply_four_chains(iterations); });
-  record_kernel(observations, "fp64_mul_parallel4", iterations * 16, fp_mul4,
+  record_kernel(observations, "fp64_mul_parallel4", iterations * 16, fp_mul4, warnings,
                 {{"chains", "4"}, {"bound", "backend"}, {"class", "floating-point"}});
 }
 
@@ -2398,24 +2659,56 @@ void benchmark_branch_structures(const Options &options, int cpu,
 }
 
 #if defined(__x86_64__)
-std::uint64_t rob_trial(volatile std::uint64_t *first, volatile std::uint64_t *second,
-                        std::size_t filler_iterations, bool flush) {
+using RobTrialFunction = std::uint64_t (*)(const std::uint64_t *, const std::uint64_t *);
+
+std::unique_ptr<ExecutableBuffer> build_rob_trial_function(std::size_t filler_instructions) {
+  auto code = std::make_unique<ExecutableBuffer>(128 + filler_instructions * 4);
+  std::size_t offset = 0;
+  auto emit = [&](std::initializer_list<std::uint8_t> bytes) {
+    for (const auto byte : bytes) code->bytes()[offset++] = static_cast<std::byte>(byte);
+  };
+  // Six caller-saved independent chains. Every generated add is exactly one x86 instruction
+  // and one simple integer uop on the supported x86/C86 targets.
+  emit({0x45, 0x31, 0xc0});  // xor r8d,r8d
+  emit({0x45, 0x31, 0xc9});  // xor r9d,r9d
+  emit({0x45, 0x31, 0xd2});  // xor r10d,r10d
+  emit({0x45, 0x31, 0xdb});  // xor r11d,r11d
+  emit({0x31, 0xc9});        // xor ecx,ecx
+  emit({0x31, 0xd2});        // xor edx,edx
+  emit({0x48, 0x8b, 0x07});  // mov rax,[rdi] -- first cold load
+  const std::array<std::array<std::uint8_t, 4>, 6> adds{{
+      {{0x49, 0x83, 0xc0, 0x01}}, {{0x49, 0x83, 0xc1, 0x01}},
+      {{0x49, 0x83, 0xc2, 0x01}}, {{0x49, 0x83, 0xc3, 0x01}},
+      {{0x48, 0x83, 0xc1, 0x01}}, {{0x48, 0x83, 0xc2, 0x01}},
+  }};
+  for (std::size_t index = 0; index < filler_instructions; ++index) {
+    for (const auto byte : adds[index % adds.size()])
+      code->bytes()[offset++] = static_cast<std::byte>(byte);
+  }
+  emit({0x48, 0x8b, 0x3e});  // mov rdi,[rsi] -- second independent cold load
+  emit({0x48, 0x31, 0xf8});  // xor rax,rdi
+  emit({0x4c, 0x31, 0xc0});  // xor rax,r8
+  emit({0x4c, 0x31, 0xc8});  // xor rax,r9
+  emit({0x4c, 0x31, 0xd0});  // xor rax,r10
+  emit({0x4c, 0x31, 0xd8});  // xor rax,r11
+  emit({0x48, 0x31, 0xc8});  // xor rax,rcx
+  emit({0x48, 0x31, 0xd0});  // xor rax,rdx
+  emit({0xc3});              // ret
+  code->seal();
+  return code;
+}
+
+std::uint64_t rob_trial(RobTrialFunction function, const std::uint64_t *first,
+                        const std::uint64_t *second, bool flush) {
   if (flush) {
-    _mm_clflush(const_cast<std::uint64_t *>(first));
-    _mm_clflush(const_cast<std::uint64_t *>(second));
+    _mm_clflush(first);
+    _mm_clflush(second);
     _mm_mfence();
   }
-  std::uint64_t one = 0, two = 0, filler = 1;
   const auto begin = cycle_counter();
-  asm volatile("movq (%[address]), %[value]"
-               : [value] "=r"(one) : [address] "r"(first) : "memory");
-  for (std::size_t index = 0; index < filler_iterations; ++index) {
-    asm volatile("addq $1, %[filler]" : [filler] "+r"(filler));
-  }
-  asm volatile("movq (%[address]), %[value]"
-               : [value] "=r"(two) : [address] "r"(second) : "memory");
+  const auto value = function(first, second);
   const auto end = cycle_counter();
-  global_sink = global_sink ^ one ^ two ^ filler;
+  global_sink = global_sink ^ value;
   return end - begin;
 }
 
@@ -2432,29 +2725,32 @@ void benchmark_rob(const Options &options, std::vector<Observation> &observation
   if (options.profile == "smoke") return;
   pin_to_cpu(cpu);
   MappedBuffer buffer(16U * 1024U * 1024U);
-  auto *first = reinterpret_cast<volatile std::uint64_t *>(buffer.bytes());
-  auto *second = reinterpret_cast<volatile std::uint64_t *>(buffer.bytes() + 8U * 1024U * 1024U);
-  *const_cast<std::uint64_t *>(first) = 1;
-  *const_cast<std::uint64_t *>(second) = 2;
-  const std::size_t maximum = options.profile == "quick" ? 256 : 768;
+  auto *first = reinterpret_cast<std::uint64_t *>(buffer.bytes());
+  auto *second = reinterpret_cast<std::uint64_t *>(buffer.bytes() + 8U * 1024U * 1024U);
+  *first = 1;
+  *second = 2;
+  const std::size_t maximum = options.profile == "quick" ? 640 : 1024;
   const std::size_t step = options.profile == "quick" ? 16 : 8;
   const int trials = options.profile == "quick" ? 15 : 31;
   std::vector<std::pair<std::size_t, double>> penalties;
   for (std::size_t filler = 0; filler <= maximum; filler += step) {
+    auto code = build_rob_trial_function(filler);
+    const auto function = code->function_at<RobTrialFunction>();
     std::vector<std::uint64_t> cold;
     std::vector<std::uint64_t> hot;
     for (int trial = 0; trial < trials; ++trial) {
-      hot.push_back(rob_trial(first, second, filler, false));
-      cold.push_back(rob_trial(first, second, filler, true));
+      hot.push_back(rob_trial(function, first, second, false));
+      cold.push_back(rob_trial(function, first, second, true));
     }
     const double penalty = std::max(0.0, median(cold) - median(hot));
     penalties.emplace_back(filler, penalty);
     add_observation(observations, "reorder_window", "cold_load_overlap_penalty", penalty,
                     "counter-ticks", "low",
-                    "two flushed loads separated by a dynamic independent-uop window",
+                    "two flushed loads separated by an exact static one-uop instruction window",
                     {{"cpu", std::to_string(cpu)},
-                     {"filler_iterations", std::to_string(filler)},
-                     {"estimated_uops", std::to_string(filler * 2)}});
+                     {"filler_instructions", std::to_string(filler)},
+                     {"filler_uops", std::to_string(filler)},
+                     {"fixed_instructions_before_second_load", "7"}});
   }
   double baseline = 0.0;
   const std::size_t baseline_points = std::min<std::size_t>(4, penalties.size());
@@ -2462,17 +2758,30 @@ void benchmark_rob(const Options &options, std::vector<Observation> &observation
   baseline /= static_cast<double>(baseline_points);
   std::optional<std::size_t> knee;
   for (std::size_t index = baseline_points; index < penalties.size(); ++index) {
-    if (penalties[index].second > baseline * 1.45 && penalties[index].second > baseline + 30.0) {
+    constexpr std::size_t sustain = 3;
+    if (index + sustain <= penalties.size() &&
+        penalties[index].second > baseline * 1.35 &&
+        penalties[index].second > baseline + 20.0 &&
+        std::all_of(penalties.begin() + static_cast<std::ptrdiff_t>(index),
+                    penalties.begin() + static_cast<std::ptrdiff_t>(index + sustain),
+                    [&](const auto &point) {
+                      return point.second > baseline * 1.35 && point.second > baseline + 20.0;
+                    })) {
       knee = penalties[index].first;
       break;
     }
   }
   if (knee.has_value()) {
+    constexpr std::size_t fixed_before_second_load = 7;
     add_observation(observations, "reorder_window", "rob_capacity_proxy",
-                    static_cast<double>(*knee * 2), "estimated-uops", "low",
-                    "first loss of overlap; loop body is approximately two fused-domain uops",
-                    {{"lower_bound", std::to_string((*knee > step ? *knee - step : 0) * 2)},
-                     {"upper_bound", std::to_string((*knee + step) * 3)}});
+                    static_cast<double>(*knee + fixed_before_second_load), "static-instructions", "low",
+                    "first sustained loss of overlap in an exact static one-uop filler sequence",
+                    {{"exact_filler_instructions", std::to_string(*knee)},
+                     {"fixed_instructions_before_second_load",
+                      std::to_string(fixed_before_second_load)},
+                     {"lower_bound", std::to_string(
+                         (*knee > step ? *knee - step : 0) + fixed_before_second_load)},
+                     {"upper_bound", std::to_string(*knee + step + fixed_before_second_load)}});
   } else {
     warnings.push_back("ROB/乱序窗口拐点不明确；请检查原始重叠曲线");
   }
@@ -2641,11 +2950,23 @@ int main(int argc, char **argv) {
     std::vector<std::string> warnings;
     const auto cpus = discover_cpus();
     const int primary_cpu = cpus.front().cpu;
-    PerfGroup perf_probe;
-    if (!perf_probe.available()) {
-      warnings.push_back("硬件性能计数器不可用：" + perf_probe.error() +
+    pin_to_cpu(primary_cpu);
+    PerfEnvironment perf_environment;
+    perf_environment.perf_event_paranoid = read_file("/proc/sys/kernel/perf_event_paranoid");
+    perf_environment.nmi_watchdog = read_file("/proc/sys/kernel/nmi_watchdog");
+    perf_environment.core = probe_perf_group(PerfGroupKind::Core);
+    perf_environment.branch = probe_perf_group(PerfGroupKind::Branch);
+    perf_environment.cache = probe_perf_group(PerfGroupKind::Cache);
+    if (!perf_environment.core.available) {
+      warnings.push_back("核心硬件性能计数器不可用：" + perf_environment.core.error +
                          "；已省略 IPC 与精确的每核心周期估计");
     }
+    if (!perf_environment.branch.available)
+      warnings.push_back("分支硬件性能计数器不可用：" + perf_environment.branch.error +
+                         "；仍保留墙钟时间分支测试");
+    if (!perf_environment.cache.available)
+      warnings.push_back("通用缓存硬件性能计数器不可用：" + perf_environment.cache.error +
+                         "；仍保留软件内存层级测试");
 
     auto section = [](std::string_view name) { std::cerr << "[system-decap] " << name << "\n"; };
     section("timer calibration");
@@ -2671,7 +2992,7 @@ int main(int argc, char **argv) {
     section("instruction-side bandwidth and footprint");
     benchmark_instruction_fetch(options, primary_cpu, observations, warnings);
     section("core pipeline and IPC");
-    benchmark_pipeline(options, observations, primary_cpu);
+    benchmark_pipeline(options, observations, warnings, primary_cpu);
     section("multi-core and SMT compute scaling");
     benchmark_compute_scaling(options, cpus, observations);
     section("branch predictor");
@@ -2689,7 +3010,7 @@ int main(int argc, char **argv) {
     section("OS and scheduler overheads");
     benchmark_os_overheads(options, cpus, observations, warnings);
 
-    emit_json(options, observations, warnings, perf_probe.available(), perf_probe.error(),
+    emit_json(options, observations, warnings, perf_environment,
               seconds_between(run_begin, Clock::now()));
     return 0;
   } catch (const std::exception &error) {

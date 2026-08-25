@@ -40,6 +40,25 @@ def _median(values: Iterable[float]) -> float | None:
     return statistics.median(materialized) if materialized else None
 
 
+def _bandwidth_quality(item: dict[str, Any] | None) -> str:
+    if not item:
+        return "unavailable"
+    if item.get("labels", {}).get("working_set_exceeds_llc") != "true":
+        return "low"
+    return "high" if item.get("confidence", "high") == "high" else "medium"
+
+
+def _bandwidth_basis(item: dict[str, Any] | None, prefix: str) -> str:
+    if not item:
+        return "未测量"
+    coverage = item.get("labels", {}).get("working_set_exceeds_llc")
+    if coverage == "true":
+        return f"{prefix}；工作集已达到整机/读取节点 LLC 的 2 倍"
+    if coverage == "false":
+        return f"{prefix}；工作集未越过整机 LLC，结果可能主要来自缓存"
+    return f"{prefix}；缺少 LLC 覆盖证据"
+
+
 def _primary_cache(system: dict[str, Any]) -> dict[int, dict[str, Any]]:
     allowed = system.get("topology", {}).get("allowed_cpu_list", [0])
     primary = allowed[0] if allowed else 0
@@ -78,6 +97,31 @@ def _knees(curve: list[dict[str, Any]], x_label: str, ratio: float = 1.45) -> li
     return result
 
 
+def _sustained_knees(
+    curve: list[dict[str, Any]], x_label: str, ratio: float = 1.35, sustain: int = 2
+) -> list[dict[str, float]]:
+    """Return cliffs that stay elevated, rejecting isolated conflict/noise spikes."""
+    ordered = sorted(curve, key=lambda item: int(item.get("labels", {}).get(x_label, 0)))
+    result: list[dict[str, float]] = []
+    for index in range(1, len(ordered)):
+        before = float(ordered[index - 1]["value"])
+        after = float(ordered[index]["value"])
+        followers = ordered[index + 1:index + 1 + sustain]
+        if (
+            before > 0
+            and after > before * ratio
+            and len(followers) == sustain
+            and all(float(item["value"]) > before * ratio for item in followers)
+        ):
+            result.append({
+                "x": int(ordered[index].get("labels", {}).get(x_label, 0)),
+                "before": before,
+                "after": after,
+                "ratio": after / before,
+            })
+    return result
+
+
 def _pressure_knee(
     curve: list[dict[str, Any]], x_label: str, ratio: float = 1.30
 ) -> dict[str, float] | None:
@@ -100,6 +144,16 @@ def _pressure_knee(
 
 def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     observations = native.get("observations", [])
+    native_metadata = native.get("metadata", {})
+    pmu_core_error = native_metadata.get("pmu_core_error") or native_metadata.get("perf_error")
+    pmu_unavailable_basis = (
+        f"核心 PMU 组运行失败：{pmu_core_error}" if pmu_core_error else "核心 PMU 计数不可用"
+    )
+    pmu_environment = "，".join(
+        f"{name}={native_metadata[name]}"
+        for name in ("perf_event_paranoid", "nmi_watchdog")
+        if str(native_metadata.get(name, "")) != ""
+    )
     estimates: list[dict[str, Any]] = []
     diagnostics: dict[str, Any] = {
         "cache_knees": [], "tlb_knees": [], "branch_structure_knees": {}
@@ -164,7 +218,7 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
         ))
 
     tlb_curve = _matching(observations, "tlb_latency", "page_random_load_latency")
-    diagnostics["tlb_knees"] = _knees(tlb_curve, "pages", 1.35)
+    diagnostics["tlb_knees"] = _sustained_knees(tlb_curve, "pages", 1.35)
     if diagnostics["tlb_knees"]:
         first = diagnostics["tlb_knees"][0]
         estimates.append(_estimate(
@@ -246,16 +300,23 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
     bandwidth = _matching(observations, "memory_bandwidth", "stream_bandwidth")
     read_bandwidth = [item for item in bandwidth if item["labels"].get("operation") == "read"]
     one_core = [item for item in read_bandwidth if item["labels"].get("threads") == "1"]
+    one_core_best = max(one_core, key=lambda item: item["value"], default=None)
     max_read = max(read_bandwidth, key=lambda x: x["value"], default=None)
     estimates.append(_estimate(
         "memory.single_core_read_bandwidth", "单核内存读带宽",
-        max((item["value"] for item in one_core), default=None), "GB/s",
-        "high" if one_core else "unavailable", "固定在一个物理核心上的流式有效载荷", category="bandwidth",
+        one_core_best["value"] if one_core_best else None, "GB/s",
+        _bandwidth_quality(one_core_best),
+        _bandwidth_basis(one_core_best, "固定在一个物理核心上的流式有效载荷"),
+        category="bandwidth",
     ))
     estimates.append(_estimate(
         "memory.aggregate_read_bandwidth", "系统聚合内存读带宽",
-        max_read["value"] if max_read else None, "GB/s", "high" if max_read else "unavailable",
-        f"最佳实测点使用 {max_read['labels'].get('threads')} 个线程" if max_read else "未测量",
+        max_read["value"] if max_read else None, "GB/s",
+        _bandwidth_quality(max_read),
+        _bandwidth_basis(
+            max_read,
+            f"最佳实测点使用 {max_read['labels'].get('threads')} 个线程" if max_read else "未测量",
+        ),
         "只统计有效载荷带宽，不包含写分配和协议流量。", "bandwidth",
     ))
     if max_read and one_core:
@@ -281,15 +342,22 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
         items = [item for item in bandwidth if item["labels"].get("operation") == operation]
         best = max(items, key=lambda x: x["value"], default=None)
         single = [item for item in items if item["labels"].get("threads") == "1"]
+        single_best = max(single, key=lambda item: item["value"], default=None)
         estimates.append(_estimate(
             f"memory.single_core_{operation}_bandwidth", f"单核{operation_names[operation]}带宽",
-            max((item["value"] for item in single), default=None), "GB/s",
-            "high" if single else "unavailable", "固定在一个物理核心上的流式有效载荷", category="bandwidth",
+            single_best["value"] if single_best else None, "GB/s",
+            _bandwidth_quality(single_best),
+            _bandwidth_basis(single_best, "固定在一个物理核心上的流式有效载荷"),
+            category="bandwidth",
         ))
         estimates.append(_estimate(
             f"memory.aggregate_{operation}_bandwidth", f"系统聚合{operation_names[operation]}带宽",
-            best["value"] if best else None, "GB/s", "high" if best else "unavailable",
-            f"最佳实测有效载荷点使用 {best['labels'].get('threads')} 个线程" if best else "未测量",
+            best["value"] if best else None, "GB/s", _bandwidth_quality(best),
+            _bandwidth_basis(
+                best,
+                f"最佳实测有效载荷点使用 {best['labels'].get('threads')} 个线程"
+                if best else "未测量",
+            ),
             category="bandwidth",
         ))
 
@@ -319,24 +387,69 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
     numa_bw = _matching(observations, "numa", "read_bandwidth")
     local_bw = [item["value"] for item in numa_bw if item["labels"].get("local") == "true"]
     remote_bw = [item["value"] for item in numa_bw if item["labels"].get("local") == "false"]
+    local_bw_items = [item for item in numa_bw if item["labels"].get("local") == "true"]
+    remote_bw_items = [item for item in numa_bw if item["labels"].get("local") == "false"]
     estimates.append(_estimate(
         "numa.local_payload_bandwidth", "NUMA 本地有效读带宽", _median(local_bw), "GB/s",
-        "high" if local_bw and all(
-            item.get("confidence") == "high" for item in numa_bw if item["labels"].get("local") == "true"
-        ) else "medium" if local_bw else "unavailable",
+        "high" if local_bw_items and all(
+            item.get("confidence") == "high"
+            and item.get("labels", {}).get("working_set_exceeds_llc") == "true"
+            for item in local_bw_items
+        ) else "low" if local_bw_items else "unavailable",
         "NUMA 读取有效载荷矩阵对角线中位数", category="numa",
     ))
     estimates.append(_estimate(
-        "numa.interconnect_payload_bandwidth", "跨 NUMA 互联有效读带宽",
-        _median(remote_bw), "GB/s", "medium" if remote_bw else "unavailable",
-        "远端节点内存有效载荷带宽中位数",
-        "这是互联上的可持续有效载荷，不是链路原始信号速率。", "numa",
+        "numa.interconnect_payload_bandwidth", "跨 NUMA 混合路径有效读带宽",
+        _median(remote_bw), "GB/s",
+        "medium" if remote_bw_items and all(
+            item.get("labels", {}).get("working_set_exceeds_llc") == "true"
+            for item in remote_bw_items
+        ) else "low" if remote_bw_items else "unavailable",
+        "所有非本地路径的有效载荷中位数",
+        "同插槽跨 NPS 与跨插槽路径可能同时存在；应优先查看拆分后的路径指标。", "numa",
     ))
+    for relation, key_prefix, name in (
+        ("cross-numa-same-socket", "same_socket_remote", "同插槽跨 NUMA"),
+        ("cross-socket", "cross_socket", "跨插槽"),
+    ):
+        relation_latencies = [
+            item for item in numa_latency
+            if item.get("labels", {}).get("relation") == relation
+        ]
+        relation_bandwidths = [
+            item for item in numa_bw
+            if item.get("labels", {}).get("relation") == relation
+        ]
+        latency_quality = (
+            "high" if relation_latencies and all(
+                item.get("confidence") == "high" for item in relation_latencies
+            ) else "medium" if relation_latencies else "unavailable"
+        )
+        bandwidth_quality = (
+            "high" if relation_bandwidths and all(
+                item.get("confidence") == "high"
+                and item.get("labels", {}).get("working_set_exceeds_llc") == "true"
+                for item in relation_bandwidths
+            ) else "low" if relation_bandwidths else "unavailable"
+        )
+        estimates.append(_estimate(
+            f"numa.{key_prefix}_latency", f"{name}随机延迟",
+            _median(item["value"] for item in relation_latencies), "ns/access",
+            latency_quality, f"{name}路径中位数", category="numa",
+        ))
+        estimates.append(_estimate(
+            f"numa.{key_prefix}_payload_bandwidth", f"{name}有效读带宽",
+            _median(item["value"] for item in relation_bandwidths), "GB/s",
+            bandwidth_quality, f"{name}路径有效载荷中位数",
+            "仅当工作集确认越过读取节点 LLC 时标为高置信度。", "numa",
+        ))
 
     core_latencies = _matching(observations, "core_latency", "cacheline_handoff_latency")
     by_relation: dict[str, list[float]] = defaultdict(list)
     relation_names = {
         "smt-sibling": "SMT 同核线程",
+        "same-llc-different-core": "共享 LLC 的不同核心",
+        "cross-llc-same-numa": "同 NUMA 跨 LLC",
         "same-numa-different-core": "同 NUMA 不同核心",
         "cross-numa-same-socket": "同插槽跨 NUMA",
         "cross-socket": "跨插槽",
@@ -368,15 +481,17 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
     estimates.append(_estimate(
         "core.max_observed_ipc", "最大实测退休 IPC", best_ipc["value"] if best_ipc else None,
         "instructions/cycle", "high" if best_ipc else "unavailable",
-        f"最佳微内核：{best_ipc['labels'].get('kernel')}" if best_ipc else "perf 不可用",
-        "这是通用退休能力的下界，不是架构理论最大值。", "core",
+        f"最佳微内核：{best_ipc['labels'].get('kernel')}" if best_ipc else pmu_unavailable_basis,
+        ("这是通用退休能力的下界，不是架构理论最大值。" if best_ipc else pmu_environment), "core",
     ))
     nop_ipc = [item for item in pipeline_ipc if item["labels"].get("kernel") == "nop_frontend"]
     frontend_lower = math.floor(max((item["value"] for item in nop_ipc), default=0)) or None
     estimates.append(_estimate(
         "core.frontend_width_lower_bound", "前端/退休宽度下界", frontend_lower, "instructions/cycle",
-        "low" if frontend_lower else "unavailable", "NOP 流退休 IPC 向下取整",
-        "µop 缓存、宏融合、NOP 特殊处理和退休宽度可能比译码宽度更早成为瓶颈。", "core",
+        "low" if frontend_lower else "unavailable",
+        "NOP 流退休 IPC 向下取整" if frontend_lower else pmu_unavailable_basis,
+        ("µop 缓存、宏融合、NOP 特殊处理和退休宽度可能比译码宽度更早成为瓶颈。"
+         if frontend_lower else pmu_environment), "core",
     ))
     add_parallel = [
         item for item in _matching(observations, "pipeline", "operations_per_cycle")
@@ -386,8 +501,8 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
     estimates.append(_estimate(
         "core.integer_add_lanes_lower_bound", "整数加法后端吞吐下界",
         best_add["value"] if best_add else None, "adds/cycle", "low" if best_add else "unavailable",
-        f"最佳独立链微内核：{best_add['labels'].get('kernel')}" if best_add else "perf 不可用",
-        "近似可用执行吞吐，不能直接视为执行端口数量。", "core",
+        f"最佳独立链微内核：{best_add['labels'].get('kernel')}" if best_add else pmu_unavailable_basis,
+        "近似可用执行吞吐，不能直接视为执行端口数量。" if best_add else pmu_environment, "core",
     ))
     dep_add = [
         item for item in _matching(observations, "pipeline", "cycles_per_operation")
@@ -472,11 +587,17 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
     ))
 
     rob = _matching(observations, "reorder_window", "rob_capacity_proxy")
+    architecture = native_metadata.get("architecture", "")
     estimates.append(_estimate(
         "core.rob_capacity_proxy", "ROB/乱序窗口容量估计", rob[0]["value"] if rob else None,
-        "estimated µops", "low" if rob else "unavailable",
-        rob[0]["method"] if rob else "探针不可用或未找到稳定拐点",
-        "这是动态循环 µop 估计值，应在多种频率与 perf 权限条件下交叉验证。", "core",
+        ("条静态指令" if rob and rob[0].get("unit") == "static-instructions"
+         else rob[0].get("unit", "条静态指令") if rob else "条静态指令"),
+        "low" if rob else "unavailable",
+        (rob[0]["method"] if rob else
+         "ARM64 暂无可移植的精确静态窗口探针" if architecture == "arm64" else
+         "精确静态窗口曲线未找到连续保持的拐点"),
+        ("填充区每条指令均为一个简单整数 µop；结果仍可能先受 scheduler、load queue 或物理寄存器限制。"
+         if rob else "未输出不稳定的单点阈值；请查看原始重叠曲线和运行警告。"), "core",
     ))
 
     branch_time = _matching(observations, "branch", "time_per_branch")

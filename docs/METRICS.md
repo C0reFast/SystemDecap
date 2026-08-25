@@ -55,7 +55,9 @@ load p0 → load p1 → load p2 → ...
 
 ## 4. TLB 与地址翻译
 
-每个基础页只放一个指针，页序随机，保持依赖加载。输出：
+每个基础页只放一个指针，页序随机，保持依赖加载。基础页探针显式请求
+`MADV_NOHUGEPAGE`，并让相邻虚拟页使用轮换的 cache-line offset，将访问分散到
+L1D cache set，避免“每页 offset 0”把 cache associativity 冲突误判成 TLB 拐点。输出：
 
 - page count；
 - page size；
@@ -63,7 +65,9 @@ load p0 → load p1 → load p2 → ...
 - ns/access；
 - 相邻点 latency ratio 与经验 knee。
 
-首个拐点只是某级 TLB/页表 cache 的容量候选，不应直接命名为“L1 DTLB entries”。THP 状态、页表层数、ASID/PCID、虚拟化二阶段翻译都会改变结果。
+首个拐点必须在后续至少两个测试点持续升高；孤立尖峰会被拒绝。它仍只是某级
+TLB/页表 cache 的容量候选，不应直接命名为“L1 DTLB entries”。THP 状态、页表层数、
+ASID/PCID、虚拟化二阶段翻译都会改变结果。
 
 standard/deep 还会对同一随机依赖加载工作集分别请求 `MADV_NOHUGEPAGE` 与
 `MADV_HUGEPAGE`，并从 `/proc/self/smaps` 读取 `AnonHugePages`。因此报告能区分“提出
@@ -84,6 +88,13 @@ THP 建议”和“映射确实获得匿名大页”；madvise 不保证内核�
 
 线程数按 `1, 2, 4, …, physical cores` 扩展。每个线程固定到不同物理核心，使用不重叠分片。输出单核值、每个扩展点、最佳聚合点和饱和趋势。
 
+工具从每个可见 CPU 的 sysfs cache 索引枚举并按 `shared_cpu_list` 去重 LLC 实例，
+而不是只读取主核所在 CCD 的一个 L3。自动工作集以“至少 2 × 可见整机 LLC”为目标，
+同时受档位上限与 `/proc/meminfo` 的 `MemAvailable` 安全预算约束。每个点记录
+`working_set_bytes`、`aggregate_llc_bytes`、`bytes_per_thread` 和
+`working_set_exceeds_llc`。没有越过 LLC 的值仍保留用于诊断，但置信度强制降为低，
+不得作为 DRAM 总带宽。
+
 它不是理论 DDR 带宽：不读取 DIMM 速率/通道数，不把 ECC、command、coherence、RFO 和 fabric protocol bytes 计入。工作集应大于 LLC；短 profile 或用户指定过小工作集可能测到 cache bandwidth。
 
 带载延迟探针在一个固定物理核心执行 DRAM 级随机依赖加载，同时逐级增加其他物理核心上的流式读取线程。每个点同时记录 `ns/access`、压力线程数和真正达到的并发 `GB/s`，用于观察控制器/互联接近饱和时的 latency cliff。
@@ -103,7 +114,12 @@ iTLB 和下级取指路径的相对台阶，不应解释成 DRAM 物理带宽。
 2. 随机依赖链测 `ns/access`。
 3. 目标 CPU node 的物理核心并行读取同一 memory node，测 payload GB/s。
 
-矩阵对角线是 local，非对角线是 remote。摘要提供 local/remote 中位 latency、remote/local penalty，以及 remote payload 的中位数。后者是“互联可承载的有效远端内存流量”，不能直接倒推出物理 link 宽度、lane 数或 signaling rate。
+矩阵对角线是 local，非对角线进一步按 socket 拆成
+`cross-numa-same-socket` 与 `cross-socket`。摘要分别提供同插槽跨 NPS/NUMA 和跨插槽的
+延迟与有效载荷，避免把两种物理路径混成一个数。NUMA 带宽工作集以读取节点的全部
+LLC 的 2 倍为目标；每个点保留读写 socket、放置方式与 LLC 覆盖证据。只有确认越过
+读取节点 LLC 的值才能取得高置信度。远端 payload 是互联可承载的有效载荷，不能直接
+倒推出物理 link 宽度、lane 数或 signaling rate。
 
 待扩展：双向同时流量、all-to-all saturation、不同 hop 数、socket/die fabric 分离、coherence 与 non-coherent DMA、GPU/CXL/PCIe peer traffic。
 
@@ -114,7 +130,8 @@ iTLB 和下级取指路径的相对台阶，不应解释成 DRAM 物理带宽。
 两个固定线程通过一个独占 cache line 做 release/acquire ping-pong，往返时间除 2，输出 `ns/one-way`。自动分类：
 
 - SMT sibling；
-- same NUMA / different core；
+- same LLC / different core；
+- cross LLC / same NUMA；
 - cross NUMA / same socket；
 - cross socket。
 
@@ -137,7 +154,11 @@ smoke/quick 每类选代表 pair；standard 采集全部可见物理核心 pair�
 - 4 条独立 multiply chains：multiply throughput；
 - FP64 add/multiply 的单依赖链与四独立链：标量浮点延迟和吞吐。
 
-若 `perf_event_open` 可用，每个 kernel 同时输出：
+性能计数器拆成三个独立小组：`cycles + instructions`、
+`branches + branch-misses`、`cache-references + cache-misses`。每组均检查
+open/reset/enable/disable/read，并运行短负载确认 `time_running > 0`；因此分支或缓存
+事件受约束时不会再连带使 IPC 失效。元数据与中文警告保留每组具体错误、
+`perf_event_paranoid` 和 `nmi_watchdog`。若核心组可用，每个 kernel 同时输出：
 
 - `instructions / core cycles`（retired IPC）；
 - known operations / core cycles；
@@ -162,9 +183,14 @@ perf core cycles/wall-time，因此可把吞吐扩展下降与全核频率变化
 
 ## 9. ROB / 乱序窗口
 
-当前 x86/C86 probe 把两个被 flush 的独立 cache miss 分开，中间插入可变长度动态 integer-uop loop。只要第二个 miss 能进入乱序窗口，两次 miss 会重叠；超过窗口后 cold-hot penalty 出现台阶。报告输出完整曲线、first knee 和保守 µop 区间。
+当前 x86/C86 probe 把两个被 flush 的独立 cache miss 分开，中间插入运行时生成、
+静态展开的简单整数加法序列。每条填充指令精确对应一个简单整数 µop，不再使用包含
+循环索引、比较和跳转的动态 C++ 循环。只有连续三个点保持 cold-hot penalty 台阶时
+才输出代理值；报告保留精确填充指令数、第二次 load 前的固定指令数和保守区间。
 
-这是**低置信代理**，因为结果可能由以下任一资源先耗尽：ROB、integer scheduler、load queue、physical registers、branch/loop buffer、dispatch width 或 memory-level parallelism。循环的 macro-fusion 也令“dynamic iteration → µop”只能估算。
+这仍是**低置信代理**，因为结果可能由以下任一资源先耗尽：ROB、integer scheduler、
+load queue、physical registers、dispatch width 或 memory-level parallelism。SMT 活跃状态
+也可能改变每线程可见窗口；报告不得把该代理值写成硬件 ROB 真值。
 
 ARM64 目前不输出 ROB 数量，明确标记 unavailable。跨 ARM vendor 稳定清理 cache line 且生成精确可变静态 µop 窗口需要单独 backend；输出一个不可靠数字比留空更糟。
 

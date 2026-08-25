@@ -17,6 +17,8 @@ CONFIDENCE_ZH = {
 }
 RELATION_ZH = {
     "smt-sibling": "SMT 同核线程",
+    "same-llc-different-core": "共享 LLC 的不同核心",
+    "cross-llc-same-numa": "同 NUMA 跨 LLC",
     "same-numa-different-core": "同 NUMA 不同核心",
     "cross-numa-same-socket": "同插槽跨 NUMA",
     "cross-socket": "跨插槽",
@@ -144,6 +146,7 @@ METHOD_ZH = {
     "two independent atomics at varying byte separation": "两个独立原子变量使用不同字节间距",
     "NUMA-placed random pointer chase": "在指定 NUMA 节点放置页面后执行随机指针追逐",
     "pinned NUMA aggregate read payload": "固定线程的 NUMA 聚合读取有效载荷",
+    "pinned NUMA aggregate read payload with LLC coverage metadata": "固定线程的 NUMA 聚合读取有效载荷，并记录读取节点 LLC 覆盖证据",
     "architecture-specific scalar assembly microkernel": "架构专用标量汇编微内核",
     "operations divided by invariant/platform counter ticks": "操作数除以不变/平台计数器 tick",
     "perf core cycles divided by wall time during kernel": "微内核期间 perf 核心周期除以墙钟时间",
@@ -155,6 +158,8 @@ METHOD_ZH = {
     "perf branch misses / branch instructions": "perf 分支未命中数除以分支指令数",
     "two flushed loads separated by a dynamic independent-uop window": "两次已刷新的加载之间插入动态独立 µop 窗口",
     "first loss of overlap; loop body is approximately two fused-domain uops": "首次失去重叠；循环体近似为两个融合域 µop",
+    "two flushed loads separated by an exact static one-uop instruction window": "两次已刷新的加载之间插入精确静态展开的一微操作指令窗口",
+    "first sustained loss of overlap in an exact static one-uop filler sequence": "精确静态一微操作填充序列中首次连续失去加载重叠",
     "direct SYS_getpid loop": "直接调用 SYS_getpid 的循环",
     "write one byte per anonymous base page": "每个匿名基础页写入一个字节",
     "getrusage delta around anonymous first touch": "匿名页首次触碰前后的 getrusage 差值",
@@ -433,7 +438,13 @@ def _heatmap(
 
 def _metric_card(item: dict[str, Any] | None, eyebrow: str) -> str:
     if not item or not item.get("available"):
-        return f'<article class="metric unavailable"><span>{_h(eyebrow)}</span><strong>不可用</strong><small>请查看运行警告</small></article>'
+        basis = item.get("basis", "未采集或当前平台不适用") if item else "未采集或当前平台不适用"
+        caveat = item.get("caveat", "") if item else ""
+        detail = f'<div class="metric-detail">{_h(caveat)}</div>' if caveat else ""
+        return (
+            f'<article class="metric unavailable"><span>{_h(eyebrow)}</span>'
+            f'<strong>不可用</strong><small>{_h(_method_zh(basis))}</small>{detail}</article>'
+        )
     confidence = item.get("confidence", "unknown")
     return f"""
     <article class="metric reveal">
@@ -641,9 +652,11 @@ def render_report(report: dict[str, Any]) -> str:
     rob_curve = _line_chart(
         "乱序窗口重叠探针",
         _obs(report, "reorder_window", "cold_load_overlap_penalty"),
-        lambda item: int(item["labels"]["estimated_uops"]), lambda _: "冷加载 − 热加载",
+        lambda item: int(item["labels"].get(
+            "filler_instructions", item["labels"].get("estimated_uops", 0)
+        )), lambda _: "冷加载 − 热加载",
         lambda x: str(int(x)), "counter-ticks",
-        "仅支持 x86/C86。第二次缓存缺失无法再与第一次重叠时会出现台阶；它是低置信度的 ROB/调度窗口代理量。",
+        "x86/C86 使用精确静态展开的一微操作整数指令窗口；连续台阶表示第二次缓存缺失不再与第一次重叠。它仍是 ROB/调度资源的低置信代理量。",
     )
 
     pipeline_rows = []
@@ -838,10 +851,12 @@ section{{padding:72px 0;border-bottom:1px solid var(--line);scroll-margin-top:54
     {_metric_card(estimates.get('core.max_observed_ipc'), '最大实测 IPC')}
     {_metric_card(estimates.get('core.frontend_width_lower_bound'), '前端宽度下界')}
     {_metric_card(estimates.get('core.rob_capacity_proxy'), 'ROB 窗口代理值')}
-    {_metric_card(estimates.get('numa.remote_latency'), '跨 NUMA 延迟')}
-    {_metric_card(estimates.get('numa.interconnect_payload_bandwidth'), '互联有效载荷带宽')}
+    {_metric_card(estimates.get('numa.same_socket_remote_latency') or estimates.get('numa.remote_latency'), '同插槽跨 NUMA 延迟')}
+    {_metric_card(estimates.get('numa.same_socket_remote_payload_bandwidth') or estimates.get('numa.interconnect_payload_bandwidth'), '同插槽跨 NUMA 带宽')}
+    {_metric_card(estimates.get('numa.cross_socket_latency'), '跨插槽延迟')}
+    {_metric_card(estimates.get('numa.cross_socket_payload_bandwidth'), '跨插槽有效载荷带宽')}
     {_metric_card(estimates.get('core.integer_add_lanes_lower_bound'), '整数加法吞吐')}
-    {_metric_card(estimates.get('coherence.same-numa-different-core'), '同节点核间传递')}
+    {_metric_card(estimates.get('coherence.same-llc-different-core') or estimates.get('coherence.same-numa-different-core'), '共享 LLC 核间传递')}
     {_metric_card(estimates.get('tlb.first_knee'), '首个 TLB 拐点')}
     {_metric_card(estimates.get('branch.unpredictable_penalty'), '随机分支代价')}
   </div>

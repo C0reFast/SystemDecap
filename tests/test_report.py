@@ -114,6 +114,26 @@ class ReportTests(unittest.TestCase):
         ):
             self.assertIn(title, rendered)
 
+    def test_unavailable_metric_card_shows_the_specific_failure_reason(self):
+        report = self._base_report("standard")
+        report["estimates"] = [{
+            "key": "core.max_observed_ipc",
+            "name": "最大实测退休 IPC",
+            "value": None,
+            "unit": "instructions/cycle",
+            "confidence": "unavailable",
+            "basis": "核心 PMU 组运行失败：time_running 为 0（事件无法调度）",
+            "caveat": "perf_event_paranoid=2，nmi_watchdog=1",
+            "category": "core",
+            "available": False,
+        }]
+
+        rendered = render_report(report)
+
+        self.assertIn("核心 PMU 组运行失败：time_running 为 0（事件无法调度）", rendered)
+        self.assertIn("perf_event_paranoid=2，nmi_watchdog=1", rendered)
+        self.assertNotIn("请查看运行警告", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
