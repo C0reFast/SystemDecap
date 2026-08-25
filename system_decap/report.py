@@ -12,6 +12,134 @@ from typing import Any, Callable
 
 PALETTE = ["#ff6b35", "#00a6a6", "#e3b341", "#4f7cff", "#ce5a9e", "#78b159", "#8f72d8"]
 
+CONFIDENCE_ZH = {
+    "high": "高", "medium": "中", "low": "低", "unavailable": "不可用", "unknown": "未知",
+}
+RELATION_ZH = {
+    "smt-sibling": "SMT 同核线程",
+    "same-numa-different-core": "同 NUMA 不同核心",
+    "cross-numa-same-socket": "同插槽跨 NUMA",
+    "cross-socket": "跨插槽",
+    "unknown": "未知关系",
+}
+OPERATION_ZH = {"read": "读取", "write": "写入", "copy": "复制", "triad": "三元运算"}
+PATTERN_ZH = {"always-taken": "始终跳转", "alternating": "交替跳转", "random": "随机跳转"}
+KERNEL_ZH = {
+    "nop_frontend": "NOP 前端流",
+    "integer_add_dependency": "整数加法·依赖链",
+    "integer_add_parallel4": "整数加法·4 条并行链",
+    "integer_add_parallel8": "整数加法·8 条并行链",
+    "integer_mul_dependency": "整数乘法·依赖链",
+    "integer_mul_parallel4": "整数乘法·4 条并行链",
+}
+GROUP_ZH = {
+    "timer": "计时器", "cache_latency": "缓存延迟", "tlb_latency": "TLB 延迟",
+    "memory_bandwidth": "内存带宽", "cache_bandwidth": "缓存带宽",
+    "memory_access": "内存访问", "memory_parallelism": "内存级并行",
+    "core_latency": "核间延迟", "coherence": "缓存一致性", "numa": "NUMA",
+    "pipeline": "核心流水线", "branch": "分支预测", "reorder_window": "乱序窗口",
+    "os_overhead": "操作系统开销",
+}
+METRIC_ZH = {
+    "steady_clock_call": "单调时钟读取开销",
+    "cycle_counter_min": "周期计数器最小读取开销",
+    "cycle_counter_mean": "周期计数器平均读取开销",
+    "counter_frequency": "平台计数器频率",
+    "random_load_latency": "随机依赖加载延迟",
+    "page_random_load_latency": "逐页随机加载延迟",
+    "stream_bandwidth": "流式有效载荷带宽",
+    "working_set_bandwidth": "工作集带宽",
+    "stride_access_rate": "固定步长访问速率",
+    "stride_payload_bandwidth": "固定步长有效载荷带宽",
+    "effective_load_latency": "有效加载延迟",
+    "random_load_rate": "随机加载速率",
+    "cacheline_handoff_latency": "缓存行核间传递延迟",
+    "atomic_update_rate": "原子更新速率",
+    "load_latency": "加载延迟",
+    "read_bandwidth": "读取带宽",
+    "operation_throughput": "微内核操作吞吐",
+    "counter_tick_efficiency": "平台计数器效率",
+    "effective_core_frequency": "有效核心频率",
+    "operations_per_cycle": "每周期操作数",
+    "ipc": "每周期退休指令数（IPC）",
+    "cycles_per_operation": "每操作周期数",
+    "cache_miss_rate": "缓存未命中率",
+    "time_per_branch": "单分支耗时",
+    "miss_rate": "分支误预测率",
+    "cold_load_overlap_penalty": "冷加载重叠损失",
+    "rob_capacity_proxy": "ROB/乱序窗口容量代理值",
+    "getpid_syscall": "getpid 系统调用",
+    "anonymous_page_first_touch": "匿名页首次触碰",
+    "minor_faults": "次缺页次数",
+    "scheduler_pipe_handoff": "线程调度/管道交接",
+}
+CATEGORY_ZH = {
+    "identity": "平台身份", "topology": "拓扑", "cache": "缓存", "latency": "延迟",
+    "bandwidth": "带宽", "memory": "内存访问", "coherence": "缓存一致性",
+    "core": "核心", "branch": "分支", "os": "操作系统", "environment": "运行环境",
+}
+KIND_ZH = {
+    "inventory": "系统清点", "measured": "直接测量", "inferred": "推断",
+    "measured with perf": "使用 perf 测量", "inferred on x86": "x86 平台推断",
+}
+CACHE_TYPE_ZH = {"Data": "数据", "Instruction": "指令", "Unified": "统一"}
+METHOD_ZH = {
+    "back-to-back steady_clock calls": "连续调用 steady_clock",
+    "serialized back-to-back counter reads": "串行化连续读取平台计数器",
+    "counter delta over monotonic wall interval": "单调墙钟区间内的平台计数器增量",
+    "random dependent pointer chase": "随机依赖指针追逐",
+    "one random dependent access per base page": "每个基础页一次随机依赖访问",
+    "parallel pinned streaming kernel; payload bytes": "固定线程并行流式内核；只统计有效载荷字节",
+    "one-core repeated streaming kernel by working-set size": "单核按工作集大小重复执行流式内核",
+    "one-core sequential fixed-stride load sweep": "单核顺序固定步长加载扫描",
+    "requested 8-byte payload only; cache-line traffic excluded": "只统计请求的 8 字节有效载荷；不含缓存行流量",
+    "independent random dependent-load chains": "多条独立的随机依赖加载链",
+    "interleaved independent random dependent-load chains": "交错执行多条独立随机依赖加载链",
+    "release/acquire cache-line ping-pong": "release/acquire 缓存行乒乓",
+    "two independent atomics at varying byte separation": "两个独立原子变量使用不同字节间距",
+    "NUMA-placed random pointer chase": "在指定 NUMA 节点放置页面后执行随机指针追逐",
+    "pinned NUMA aggregate read payload": "固定线程的 NUMA 聚合读取有效载荷",
+    "architecture-specific scalar assembly microkernel": "架构专用标量汇编微内核",
+    "operations divided by invariant/platform counter ticks": "操作数除以不变/平台计数器 tick",
+    "perf core cycles divided by wall time during kernel": "微内核期间 perf 核心周期除以墙钟时间",
+    "known operations divided by perf core cycles": "已知操作数除以 perf 核心周期",
+    "perf retired instructions / core cycles": "perf 退休指令数除以核心周期",
+    "perf core cycles divided by known operations": "perf 核心周期除以已知操作数",
+    "generic perf cache misses/references": "通用 perf 缓存未命中数/访问数",
+    "forced scalar data-dependent branch loop": "强制保留的标量数据依赖分支循环",
+    "perf branch misses / branch instructions": "perf 分支未命中数除以分支指令数",
+    "two flushed loads separated by a dynamic independent-uop window": "两次已刷新的加载之间插入动态独立 µop 窗口",
+    "first loss of overlap; loop body is approximately two fused-domain uops": "首次失去重叠；循环体近似为两个融合域 µop",
+    "direct SYS_getpid loop": "直接调用 SYS_getpid 的循环",
+    "write one byte per anonymous base page": "每个匿名基础页写入一个字节",
+    "getrusage delta around anonymous first touch": "匿名页首次触碰前后的 getrusage 差值",
+    "blocking pipe ping-pong between pinned threads": "固定线程之间使用阻塞管道乒乓交接",
+}
+
+
+def _value_zh(key: str, value: Any) -> str:
+    text = str(value)
+    mappings = {
+        "operation": OPERATION_ZH, "relation": RELATION_ZH,
+        "pattern": PATTERN_ZH, "kernel": KERNEL_ZH,
+        "matrix_scope": {
+            "physical-core": "物理核心矩阵", "logical-cpu": "逻辑 CPU 矩阵",
+            "representative": "代表性采样",
+        },
+        "local": {"true": "本地", "false": "远端"},
+        "bound": {"frontend": "前端约束", "backend": "后端约束", "dependency": "依赖链约束"},
+    }
+    return mappings.get(key, {}).get(text, text)
+
+
+def _label_text(labels: dict[str, Any]) -> str:
+    return " · ".join(f"{key}={_value_zh(key, value)}" for key, value in sorted(labels.items()))
+
+
+def _method_zh(value: Any) -> str:
+    text = str(value or "")
+    return METHOD_ZH.get(text, text)
+
 
 def _h(value: Any) -> str:
     return html.escape(str(value), quote=True)
@@ -132,7 +260,7 @@ def _line_chart(
         coords = " ".join(f"{px(x):.2f},{py(y):.2f}" for x, y, _ in points)
         elements.append(f'<polyline class="series-line" points="{coords}" stroke="{color}"/>')
         for x, y, item in points:
-            label_detail = ", ".join(f"{k}={v}" for k, v in item.get("labels", {}).items())
+            label_detail = _label_text(item.get("labels", {}))
             elements.append(
                 f'<circle class="point" cx="{px(x):.2f}" cy="{py(y):.2f}" r="4.5" fill="{color}">'
                 f'<title>{_h(series)} · {_h(label_detail)} · {y:.4f} {_h(unit)}</title></circle>'
@@ -214,27 +342,29 @@ def _heatmap(
                 cells.append('<td class="missing">—</td>')
             else:
                 cells.append(
-                    f'<td style="--cell:{color(value)}"><strong>{value:.2f}</strong><small>{_h(unit)}</small></td>'
+                    f'<td class="measured" style="--cell:{color(value)}" '
+                    f'title="{_h(row_prefix)} {_h(row)} → {_h(column_prefix)} {_h(column)}: {value:.4f} {_h(unit)}">'
+                    f'<strong>{value:.2f}</strong><small>{_h(unit)}</small></td>'
                 )
         body.append(f"<tr><th>{_h(row_prefix)} { _h(row) }</th>{''.join(cells)}</tr>")
     return f"""
     <div class="chart reveal heatmap-card"><div class="chart-heading"><h3>{_h(title)}</h3>
       <span class="range">{minimum:.2f} → {maximum:.2f} {_h(unit)}</span></div>
-      <div class="table-scroll"><table class="heatmap"><thead><tr>{header}</tr></thead><tbody>{''.join(body)}</tbody></table></div>
+      <div class="table-scroll"><table class="heatmap" data-rows="{len(rows)}" data-columns="{len(columns)}" style="--columns:{len(columns)}"><thead><tr>{header}</tr></thead><tbody>{''.join(body)}</tbody></table></div>
       <p class="chart-note">{_h(note)}</p>
     </div>"""
 
 
 def _metric_card(item: dict[str, Any] | None, eyebrow: str) -> str:
     if not item or not item.get("available"):
-        return f'<article class="metric unavailable"><span>{_h(eyebrow)}</span><strong>Not available</strong><small>See run warnings</small></article>'
+        return f'<article class="metric unavailable"><span>{_h(eyebrow)}</span><strong>不可用</strong><small>请查看运行警告</small></article>'
     confidence = item.get("confidence", "unknown")
     return f"""
     <article class="metric reveal">
       <span>{_h(eyebrow)}</span>
       <strong>{_h(_number(item.get('value'), item.get('unit', '')))}</strong>
-      <small><i class="confidence {confidence}"></i>{_h(confidence)} confidence</small>
-      <div class="metric-detail"><b>{_h(item.get('name'))}</b><br>{_h(item.get('basis'))}<br>{_h(item.get('caveat', ''))}</div>
+      <small><i class="confidence {confidence}"></i>置信度：{_h(CONFIDENCE_ZH.get(confidence, confidence))}</small>
+      <div class="metric-detail"><b>{_h(item.get('name'))}</b><br>{_h(_method_zh(item.get('basis')))}<br>{_h(item.get('caveat', ''))}</div>
     </article>"""
 
 
@@ -250,38 +380,38 @@ def _topology_visual(system: dict[str, Any]) -> str:
         for cpu in node_cpus:
             by_core[(cpu.get("socket"), cpu.get("die"), cpu.get("core"))].append(cpu["cpu"])
         core_html = "".join(
-            f'<span class="core" title="socket {key[0]}, die {key[1]}, core {key[2]}">'
+            f'<span class="core" title="插槽 {key[0]}，die {key[1]}，核心 {key[2]}">'
             f'<b>C{key[2]}</b><em>{"/".join(map(str, threads))}</em></span>'
             for key, threads in sorted(by_core.items())
         )
         nodes.append(
             f'<div class="node"><header><span>NUMA</span><strong>{_h(node)}</strong>'
-            f'<small>{len(by_core)} cores · {len(node_cpus)} threads</small></header><div class="cores">{core_html}</div></div>'
+            f'<small>{len(by_core)} 个核心 · {len(node_cpus)} 个线程</small></header><div class="cores">{core_html}</div></div>'
         )
-    return f'<div class="topology-map">{"".join(nodes)}</div>' if nodes else "<p>No accessible topology data.</p>"
+    return f'<div class="topology-map">{"".join(nodes)}</div>' if nodes else "<p>没有可访问的 CPU 拓扑数据。</p>"
 
 
 def _inventory_tables(system: dict[str, Any]) -> str:
     caches = system.get("caches", [])
     cache_rows = "".join(
-        f"<tr><td>L{_h(c.get('level'))} {_h(c.get('type'))}</td><td>{_h(_human_bytes(c.get('size_bytes')))}</td>"
+        f"<tr><td>L{_h(c.get('level'))} {_h(CACHE_TYPE_ZH.get(c.get('type'), c.get('type')))}</td><td>{_h(_human_bytes(c.get('size_bytes')))}</td>"
         f"<td>{_h(c.get('line_bytes'))}</td><td>{_h(c.get('ways'))}</td><td>{_h(c.get('sets'))}</td>"
         f"<td class='mono'>{_h(','.join(map(str, c.get('shared_cpus', []))))}</td></tr>"
         for c in caches
-    ) or '<tr><td colspan="6">No cache inventory</td></tr>'
+    ) or '<tr><td colspan="6">没有可用的缓存清点数据</td></tr>'
     numa_rows = "".join(
         f"<tr><td>{_h(n.get('node'))}</td><td class='mono'>{_h(','.join(map(str, n.get('cpus', []))))}</td>"
         f"<td>{_h(_human_bytes(n.get('memory', {}).get('MemTotal')))}</td>"
         f"<td class='mono'>{_h(' '.join(map(str, n.get('distance', []))))}</td></tr>"
         for n in system.get("numa", [])
-    ) or '<tr><td colspan="4">Single node or NUMA sysfs unavailable</td></tr>'
+    ) or '<tr><td colspan="4">单 NUMA 节点，或 NUMA sysfs 信息不可用</td></tr>'
     return f"""
     <div class="split inventory-grid">
-      <div><h3>Cache instances</h3><div class="table-scroll"><table class="data-table compact"><thead><tr>
-        <th>Level/type</th><th>Capacity</th><th>Line</th><th>Ways</th><th>Sets</th><th>Shared CPUs</th>
+      <div><h3>缓存实例</h3><div class="table-scroll"><table class="data-table compact"><thead><tr>
+        <th>层级/类型</th><th>容量</th><th>缓存行</th><th>路数</th><th>组数</th><th>共享 CPU</th>
       </tr></thead><tbody>{cache_rows}</tbody></table></div></div>
-      <div><h3>NUMA inventory</h3><div class="table-scroll"><table class="data-table compact"><thead><tr>
-        <th>Node</th><th>CPUs</th><th>Memory</th><th>Distance row</th>
+      <div><h3>NUMA 清点</h3><div class="table-scroll"><table class="data-table compact"><thead><tr>
+        <th>节点</th><th>CPU</th><th>内存</th><th>距离表行</th>
       </tr></thead><tbody>{numa_rows}</tbody></table></div></div>
     </div>"""
 
@@ -289,13 +419,18 @@ def _inventory_tables(system: dict[str, Any]) -> str:
 def _raw_table(report: dict[str, Any]) -> str:
     rows = []
     for item in report.get("observations", []):
-        labels = " · ".join(f"{k}={v}" for k, v in sorted(item.get("labels", {}).items()))
+        labels = _label_text(item.get("labels", {}))
         search = " ".join([item.get("group", ""), item.get("metric", ""), labels, item.get("method", "")])
+        group = item.get("group", "")
+        metric = item.get("metric", "")
+        confidence = item.get("confidence", "unknown")
         rows.append(
-            f'<tr data-search="{_h(search.lower())}"><td><span class="group-tag">{_h(item.get("group"))}</span></td>'
-            f'<td><b>{_h(item.get("metric"))}</b><small>{_h(item.get("method"))}</small></td>'
+            f'<tr data-search="{_h(search.lower())}"><td><span class="group-tag">{_h(GROUP_ZH.get(group, group))}</span>'
+            f'<small class="identifier">{_h(group)}</small></td>'
+            f'<td><b>{_h(METRIC_ZH.get(metric, metric))}</b><small class="identifier">{_h(metric)}</small>'
+            f'<small>方法：{_h(_method_zh(item.get("method")))}</small></td>'
             f'<td class="numeric">{_h(_number(item.get("value"), item.get("unit", "")))}</td>'
-            f'<td><i class="confidence {_h(item.get("confidence"))}"></i>{_h(item.get("confidence"))}</td>'
+            f'<td><i class="confidence {_h(confidence)}"></i>{_h(CONFIDENCE_ZH.get(confidence, confidence))}</td>'
             f'<td class="mono labels">{_h(labels)}</td></tr>'
         )
     return "".join(rows)
@@ -317,8 +452,9 @@ def _coverage(report: dict[str, Any]) -> str:
         covered = mapping.get(item.get("category"), False)
         rows.append(
             f'<tr><td><i class="coverage {"yes" if covered else "no"}"></i></td>'
-            f'<td>{_h(item.get("category"))}</td><td>{_h(item.get("metric"))}</td>'
-            f'<td>{_h(item.get("kind"))}</td><td>{_h(item.get("nominal_confidence"))}</td></tr>'
+            f'<td>{_h(CATEGORY_ZH.get(item.get("category"), item.get("category")))}</td><td>{_h(item.get("metric"))}</td>'
+            f'<td>{_h(KIND_ZH.get(item.get("kind"), item.get("kind")))}</td>'
+            f'<td>{_h(CONFIDENCE_ZH.get(item.get("nominal_confidence"), item.get("nominal_confidence")))}</td></tr>'
         )
     return "".join(rows)
 
@@ -332,92 +468,99 @@ def render_report(report: dict[str, Any]) -> str:
     run = report.get("run", {})
 
     cache_curve = _line_chart(
-        "Memory hierarchy · dependent-load latency",
+        "内存层级 · 依赖加载延迟",
         _obs(report, "cache_latency", "random_load_latency"),
-        lambda item: int(item["labels"]["working_set_bytes"]), lambda _: "random load",
+        lambda item: int(item["labels"]["working_set_bytes"]), lambda _: "随机加载",
         lambda x: _human_bytes(x), "ns/access",
-        "Working sets grow by 2×. Steps usually indicate cache-capacity boundaries; address translation is included.", True,
+        "工作集每次扩大 2 倍。曲线台阶通常对应缓存容量边界；结果同时包含地址转换开销。", True,
     )
     tlb_curve = _line_chart(
-        "Address translation · one random access per page",
+        "地址转换 · 每页一次随机访问",
         _obs(report, "tlb_latency", "page_random_load_latency"),
-        lambda item: int(item["labels"]["pages"]), lambda _: "base pages",
-        lambda x: f"{int(x)}p", "ns/access",
-        "Only one cache line is touched per page, emphasizing TLB capacity and page-walk knees.", True,
+        lambda item: int(item["labels"]["pages"]), lambda _: "基础页",
+        lambda x: f"{int(x)} 页", "ns/access",
+        "每页只访问一条缓存行，用于突出 TLB 容量边界与页表遍历拐点。", True,
     )
     bandwidth_curve = _line_chart(
-        "Sustainable memory payload bandwidth",
+        "可持续内存有效载荷带宽",
         _obs(report, "memory_bandwidth", "stream_bandwidth"),
-        lambda item: int(item["labels"]["threads"]), lambda item: item["labels"]["operation"],
+        lambda item: int(item["labels"]["threads"]), lambda item: OPERATION_ZH.get(item["labels"]["operation"], item["labels"]["operation"]),
         lambda x: str(int(x)), "GB/s",
-        "Threads are pinned to distinct physical cores. Copy/triad count useful payload, excluding coherence and write-allocate traffic.",
+        "线程固定在不同物理核心。复制/三元运算只统计有效载荷，不包含一致性与写分配流量。",
     )
     cache_bandwidth_curve = _line_chart(
-        "One-core bandwidth across cache-sized working sets",
+        "单核带宽随工作集变化",
         _obs(report, "cache_bandwidth", "working_set_bandwidth"),
-        lambda item: int(item["labels"]["working_set_bytes"]), lambda item: item["labels"]["operation"],
+        lambda item: int(item["labels"]["working_set_bytes"]), lambda item: OPERATION_ZH.get(item["labels"]["operation"], item["labels"]["operation"]),
         lambda x: _human_bytes(x), "GB/s",
-        "Repeated read/copy throughput forms hierarchy steps as the working set crosses L1, L2, L3 and memory.", True,
+        "这是刻意包含缓存效应的重复读/复制测试：32 KiB 等小工作集命中 L1/L2，出现数百 GB/s 属于缓存带宽；工作集越过 L2、L3 并最终落到 DRAM 后，带宽会逐级下降。它不能单独作为内存总带宽。", True,
     )
     stride_curve = _line_chart(
-        "Stride & hardware-prefetch sensitivity",
+        "访问步长与硬件预取敏感度",
         _obs(report, "memory_access", "stride_access_rate"),
-        lambda item: int(item["labels"]["stride_bytes"]), lambda _: "fixed stride",
+        lambda item: int(item["labels"]["stride_bytes"]), lambda _: "固定步长",
         lambda x: f"{int(x)}B", "Gaccess/s",
-        "Only requested 8-byte loads are counted. Larger strides reduce cache-line utilization and challenge prefetchers.", True,
+        "只统计请求的 8 字节加载。更大步长会降低缓存行利用率，并逐步超出硬件预取器能力。", True,
     )
     mlp_curve = _line_chart(
-        "Memory-level parallelism",
+        "内存级并行度（MLP）",
         _obs(report, "memory_parallelism", "random_load_rate"),
-        lambda item: int(item["labels"]["chains"]), lambda _: "independent chains",
+        lambda item: int(item["labels"]["chains"]), lambda _: "独立依赖链",
         lambda x: str(int(x)), "Gaccess/s",
-        "Independent random chains, each internally dependent, expose a lower bound on concurrent misses sustained by one core.", True,
+        "多条相互独立、链内依赖的随机访问链，用于测量单核可维持的并发缺失数下界。", True,
     )
     false_sharing_curve = _line_chart(
-        "False-sharing boundary",
+        "伪共享边界",
         _obs(report, "coherence", "atomic_update_rate"),
-        lambda item: int(item["labels"]["separation_bytes"]), lambda _: "two atomics",
+        lambda item: int(item["labels"]["separation_bytes"]), lambda _: "两个原子变量",
         lambda x: f"{int(x)}B", "Mop/s",
-        "Two cores update distinct atomics. The throughput recovery usually marks the coherence-line boundary.", True,
+        "两个核心分别更新不同原子变量；吞吐恢复点通常对应缓存一致性行边界。", True,
     )
     rob_curve = _line_chart(
-        "Reorder-window overlap probe",
+        "乱序窗口重叠探针",
         _obs(report, "reorder_window", "cold_load_overlap_penalty"),
-        lambda item: int(item["labels"]["estimated_uops"]), lambda _: "cold − hot",
+        lambda item: int(item["labels"]["estimated_uops"]), lambda _: "冷加载 − 热加载",
         lambda x: str(int(x)), "counter-ticks",
-        "x86/C86 only. A step appears when the second cache miss no longer overlaps the first; this is a low-confidence ROB/scheduling-window proxy.",
+        "仅支持 x86/C86。第二次缓存缺失无法再与第一次重叠时会出现台阶；它是低置信度的 ROB/调度窗口代理量。",
     )
 
     pipeline_rows = []
     for item in _obs(report, "pipeline", "operations_per_cycle"):
         if item["metric"] == "operations_per_cycle":
-            pipeline_rows.append((item["labels"].get("kernel", "unknown"), item["value"], item["unit"]))
+            kernel = item["labels"].get("kernel", "unknown")
+            pipeline_rows.append((KERNEL_ZH.get(kernel, kernel), item["value"], item["unit"]))
     pipeline_chart = _bar_chart(
-        "Execution throughput by scalar microkernel", pipeline_rows,
-        "Dependency chains expose latency constraints; independent chains expose a backend throughput lower bound, not a literal port count.",
+        "标量微内核执行吞吐", pipeline_rows,
+        "依赖链暴露延迟约束，独立链给出后端吞吐下界；结果不能直接等同于执行端口数量。",
     )
     branch_rows = [
-        (item["labels"].get("pattern", "unknown"), item["value"], item["unit"])
+        (PATTERN_ZH.get(item["labels"].get("pattern", "unknown"), item["labels"].get("pattern", "unknown")), item["value"], item["unit"])
         for item in _obs(report, "branch", "time_per_branch")
     ]
     branch_chart = _bar_chart(
-        "Branch pattern cost", branch_rows,
-        "The random-versus-predictable gap approximates misprediction recovery cost. The compiler is instructed to preserve scalar branches.",
+        "不同分支模式的代价", branch_rows,
+        "随机模式与可预测模式的差值近似误预测恢复代价；编译器被要求保留标量分支。",
     )
     core_rows = []
     relations: dict[str, list[float]] = defaultdict(list)
     for item in _obs(report, "core_latency", "cacheline_handoff_latency"):
         relations[item["labels"].get("relation", "unknown")].append(item["value"])
     for relation, values in sorted(relations.items()):
-        core_rows.append((relation, sum(values) / len(values), "ns/one-way"))
+        core_rows.append((RELATION_ZH.get(relation, relation), sum(values) / len(values), "ns/one-way"))
     core_chart = _bar_chart(
-        "Core-to-core cache-line handoff", core_rows,
-        "Release/acquire ping-pong round trip divided by two. The deep profile samples a much fuller CPU-pair matrix.",
+        "核间缓存行传递延迟（按拓扑分类）", core_rows,
+        "release/acquire 乒乓往返时间除以二。standard 覆盖全部物理核心对，deep 覆盖全部可见逻辑 CPU 对。",
     )
     core_matrix = ""
-    if run.get("profile") == "deep":
+    core_latency_items = _obs(report, "core_latency", "cacheline_handoff_latency")
+    if core_latency_items:
+        scoped_items = [
+            item for item in core_latency_items
+            if item.get("labels", {}).get("matrix_scope") in {"physical-core", "logical-cpu"}
+        ]
+        source_items = scoped_items or core_latency_items
         matrix_items = []
-        for item in _obs(report, "core_latency", "cacheline_handoff_latency"):
+        for item in source_items:
             forward = dict(item)
             forward["labels"] = {**item["labels"], "row_cpu": item["labels"].get("cpu_a"),
                                   "column_cpu": item["labels"].get("cpu_b")}
@@ -425,9 +568,16 @@ def render_report(report: dict[str, Any]) -> str:
             reverse["labels"] = {**item["labels"], "row_cpu": item["labels"].get("cpu_b"),
                                   "column_cpu": item["labels"].get("cpu_a")}
             matrix_items.extend((forward, reverse))
+        scopes = {item.get("labels", {}).get("matrix_scope") for item in source_items}
+        if scopes == {"physical-core"}:
+            matrix_note = f"standard 物理核心矩阵，共实测 {len(source_items)} 个无向核心对；单元格按对称方式展开，对角线不测量。"
+        elif scopes == {"logical-cpu"}:
+            matrix_note = f"deep 逻辑 CPU 矩阵，共实测 {len(source_items)} 个无向 CPU 对；单元格按对称方式展开，对角线不测量。"
+        else:
+            matrix_note = f"当前 profile 仅采集 {len(source_items)} 个代表性核心对，因此这里是稀疏矩阵；空白单元格表示未测量。"
         core_matrix = '<div class="wide">' + _heatmap(
-            "Core-pair handoff matrix", matrix_items, "row_cpu", "column_cpu", "ns/one-way",
-            "Symmetric visualization of the deep-profile cache-line handoff pairs.", "CPU", "CPU",
+            "核间延迟矩阵（CPU × CPU）", matrix_items, "row_cpu", "column_cpu", "ns/one-way",
+            matrix_note, "CPU", "CPU",
         ) + "</div>"
     os_rows = [
         (item["metric"], item["value"], item["unit"])
@@ -435,25 +585,27 @@ def render_report(report: dict[str, Any]) -> str:
         if item.get("group") == "os_overhead" and item.get("metric") != "minor_faults"
     ]
     os_chart = _bar_chart(
-        "OS boundary overheads", os_rows,
-        "Direct syscall, anonymous-page first touch and pinned-thread pipe handoff; each bar carries its own unit.",
+        "操作系统边界开销", [(METRIC_ZH.get(name, name), value, unit) for name, value, unit in os_rows],
+        "包括直接系统调用、匿名页首次触碰和固定线程间的管道交接；每个条形保留自己的单位。",
     )
     numa_latency = _heatmap(
-        "NUMA latency matrix", _obs(report, "numa", "load_latency"),
-        "cpu_node", "memory_node", "ns/access", "Rows are executing CPU nodes; columns are page-resident memory nodes.",
+        "NUMA 延迟矩阵", _obs(report, "numa", "load_latency"),
+        "cpu_node", "memory_node", "ns/access", "行表示执行线程所在 NUMA 节点，列表示页面实际驻留的内存节点。",
+        "计算节点", "内存节点",
     )
     numa_bandwidth = _heatmap(
-        "NUMA read-bandwidth matrix", _obs(report, "numa", "read_bandwidth"),
-        "cpu_node", "memory_node", "GB/s", "Off-diagonal cells are useful payload carried by the NUMA interconnect.",
+        "NUMA 读取带宽矩阵", _obs(report, "numa", "read_bandwidth"),
+        "cpu_node", "memory_node", "GB/s", "非对角单元格表示经 NUMA 互联传输的可持续有效读取载荷。",
+        "计算节点", "内存节点",
     )
 
     warning_html = "".join(f"<li>{_h(warning)}</li>" for warning in report.get("warnings", []))
     if not warning_html:
-        warning_html = "<li>No probe warnings were emitted.</li>"
+        warning_html = "<li>本次运行没有探针警告。</li>"
     flags = cpu.get("flags", [])
     flag_html = "".join(f"<span>{_h(flag)}</span>" for flag in flags)
     dmi = system.get("dmi", {})
-    machine_name = " · ".join(filter(None, [dmi.get("sys_vendor"), dmi.get("product_name")])) or system.get("hostname", "unknown")
+    machine_name = " · ".join(filter(None, [dmi.get("sys_vendor"), dmi.get("product_name")])) or system.get("hostname", "未知主机")
     generated = datetime.now().astimezone().isoformat(timespec="seconds")
     raw_json_size = len(json.dumps(report, ensure_ascii=False))
 
@@ -461,7 +613,7 @@ def render_report(report: dict[str, Any]) -> str:
 <html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>System Decap · {_h(system.get('hostname', 'unknown'))}</title>
+<title>System Decap 平台表征报告 · {_h(system.get('hostname', '未知主机'))}</title>
 <style>
 :root{{--paper:#f4f0e8;--paper-2:#e9e2d5;--ink:#102a3a;--muted:#64727a;--line:#c8c1b4;--panel:#fbf9f4;--dark:#102a3a;--signal:#ff6b35;--teal:#007a80;--gold:#d9a62e;--shadow:0 18px 50px rgba(18,35,43,.10);--serif:"Bodoni 72","Noto Serif CJK SC","Songti SC",Georgia,serif;--sans:"Aptos","Noto Sans CJK SC","PingFang SC",sans-serif;--mono:"Berkeley Mono","SFMono-Regular","Cascadia Code",monospace}}
 html[data-theme="dark"]{{--paper:#0b1720;--paper-2:#112632;--ink:#e9eee9;--muted:#9eafb5;--line:#294451;--panel:#10232e;--dark:#07131b;--shadow:0 18px 50px rgba(0,0,0,.28)}}
@@ -475,10 +627,10 @@ body:before{{content:"";position:fixed;inset:0;pointer-events:none;opacity:.24;b
 section{{padding:72px 0;border-bottom:1px solid var(--line);scroll-margin-top:54px}}.section-head{{display:grid;grid-template-columns:.7fr 1.6fr;gap:30px;margin-bottom:34px}}h2{{font:700 clamp(34px,4.5vw,64px)/.94 var(--serif);letter-spacing:-.035em;margin:8px 0}}.section-intro{{color:var(--muted);font-size:17px;max-width:780px;align-self:end}}
 .metrics{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);box-shadow:var(--shadow)}}.metric{{position:relative;background:var(--panel);min-width:0;min-height:150px;padding:20px;display:flex;flex-direction:column;justify-content:space-between}}.metric>span{{font:700 10px/1.3 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}}.metric>strong{{font:700 clamp(22px,2.3vw,34px)/1 var(--serif);letter-spacing:-.03em;overflow-wrap:anywhere}}.metric>small{{font:11px var(--mono);color:var(--muted)}}.metric.unavailable{{opacity:.6}}.metric-detail{{display:none;position:absolute;left:12px;right:12px;bottom:calc(100% - 8px);padding:13px;background:var(--dark);color:#eef4ef;z-index:3;font-size:11px;box-shadow:var(--shadow)}}.metric:hover .metric-detail{{display:block}}
 .confidence{{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:#8d979b}}.confidence.high{{background:#00a67d}}.confidence.medium{{background:var(--gold)}}.confidence.low{{background:var(--signal)}}.confidence.unavailable{{background:#8d979b}}
-.chart-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:22px}}.chart-grid .wide{{grid-column:1/-1}}.chart{{background:var(--panel);border:1px solid var(--line);padding:20px;min-width:0;box-shadow:0 6px 20px rgba(18,35,43,.05)}}.chart-heading{{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:8px}}.chart h3,.inventory-grid h3{{font:700 21px/1.1 var(--serif);margin:0}}.chart svg{{width:100%;height:auto;overflow:visible}}.plot-bg,.bar-track{{fill:color-mix(in srgb,var(--paper-2) 55%,transparent)}}.grid{{stroke:var(--line);stroke-width:1;stroke-dasharray:2 5}}.tick{{stroke:var(--muted)}}.axis,.axis-label,.bar-label,.bar-value{{fill:var(--muted);font:10px var(--mono)}}.axis-label{{font-weight:700;letter-spacing:.08em}}.series-line{{fill:none;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}}.point{{stroke:var(--panel);stroke-width:2;cursor:crosshair}}.bar{{transform-origin:left;animation:grow .8s ease both}}.bar-value{{font-weight:700;fill:var(--ink)}}.legend{{display:flex;gap:12px;flex-wrap:wrap;font:10px var(--mono);color:var(--muted)}}.legend i{{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--swatch);margin-right:4px}}.chart-note{{margin:4px 0 0;color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding-top:12px}}.empty-chart{{min-height:240px;text-align:center}}.empty-mark{{font:60px var(--serif);color:var(--line);margin-top:38px}}.range{{font:11px var(--mono);color:var(--muted)}}
+.chart-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:22px}}.chart-grid>*{{min-width:0}}.chart-grid .wide{{grid-column:1/-1;min-width:0}}.chart{{background:var(--panel);border:1px solid var(--line);padding:20px;min-width:0;box-shadow:0 6px 20px rgba(18,35,43,.05)}}.chart-heading{{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:8px}}.chart h3,.inventory-grid h3{{font:700 21px/1.1 var(--serif);margin:0}}.chart svg{{width:100%;height:auto;overflow:visible}}.plot-bg,.bar-track{{fill:color-mix(in srgb,var(--paper-2) 55%,transparent)}}.grid{{stroke:var(--line);stroke-width:1;stroke-dasharray:2 5}}.tick{{stroke:var(--muted)}}.axis,.axis-label,.bar-label,.bar-value{{fill:var(--muted);font:10px var(--mono)}}.axis-label{{font-weight:700;letter-spacing:.08em}}.series-line{{fill:none;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}}.point{{stroke:var(--panel);stroke-width:2;cursor:crosshair}}.bar{{transform-origin:left;animation:grow .8s ease both}}.bar-value{{font-weight:700;fill:var(--ink)}}.legend{{display:flex;gap:12px;flex-wrap:wrap;font:10px var(--mono);color:var(--muted)}}.legend i{{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--swatch);margin-right:4px}}.chart-note{{margin:4px 0 0;color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding-top:12px}}.empty-chart{{min-height:240px;text-align:center}}.empty-mark{{font:60px var(--serif);color:var(--line);margin-top:38px}}.range{{font:11px var(--mono);color:var(--muted)}}
 .topology-map{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}}.node{{border:1px solid var(--line);background:var(--panel);padding:18px}}.node header{{display:grid;grid-template-columns:auto auto 1fr;align-items:baseline;gap:9px;border-bottom:1px solid var(--line);padding-bottom:12px}}.node header span{{font:10px var(--mono);color:var(--signal)}}.node header strong{{font:34px var(--serif)}}.node header small{{text-align:right;color:var(--muted)}}.cores{{display:grid;grid-template-columns:repeat(auto-fill,minmax(70px,1fr));gap:5px;padding-top:12px}}.core{{background:var(--paper-2);padding:7px 9px;display:flex;justify-content:space-between;align-items:center;border-left:2px solid var(--teal)}}.core b{{font:11px var(--mono)}}.core em{{font:9px var(--mono);color:var(--muted);font-style:normal}}
-.heatmap{{border-collapse:separate;border-spacing:5px;width:100%;min-width:430px}}.heatmap th{{font:10px var(--mono);color:var(--muted);padding:8px}}.heatmap td{{background:var(--cell);padding:18px 8px;text-align:center;color:#07131b;border-radius:3px}}.heatmap td strong{{display:block;font:700 19px var(--serif)}}.heatmap td small{{font:9px var(--mono)}}.heatmap td.missing{{background:var(--paper-2);color:var(--muted)}}
-.split{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}}.table-scroll{{overflow:auto}}table{{width:100%}}.data-table{{border-collapse:collapse;background:var(--panel);font-size:13px}}.data-table th{{text-align:left;font:700 10px var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted);background:var(--paper-2);position:sticky;top:0}}.data-table th,.data-table td{{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}}.data-table td small{{display:block;color:var(--muted);max-width:420px}}.data-table .numeric{{font:700 14px var(--mono);white-space:nowrap}}.compact th,.compact td{{padding:9px;font-size:11px}}.mono{{font-family:var(--mono);font-size:10px;word-break:break-all}}.labels{{max-width:460px}}.group-tag{{font:700 9px var(--mono);letter-spacing:.04em;background:var(--paper-2);padding:4px 6px}}
+.heatmap{{border-collapse:separate;border-spacing:5px;width:max(100%,calc((var(--columns) + 1)*76px));min-width:430px}}.heatmap th{{font:10px var(--mono);color:var(--muted);padding:8px;white-space:nowrap}}.heatmap td{{background:var(--cell);min-width:70px;padding:18px 8px;text-align:center;color:#07131b;border-radius:3px}}.heatmap td strong{{display:block;font:700 19px var(--serif)}}.heatmap td small{{font:9px var(--mono)}}.heatmap td.missing{{background:var(--paper-2);color:var(--muted)}}
+.split{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}}.table-scroll{{overflow:auto;max-width:100%}}table{{width:100%}}.data-table{{border-collapse:collapse;background:var(--panel);font-size:13px}}.data-table th{{text-align:left;font:700 10px var(--mono);letter-spacing:.07em;color:var(--muted);background:var(--paper-2);position:sticky;top:0}}.data-table th,.data-table td{{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}}.data-table td small{{display:block;color:var(--muted);max-width:420px}}.data-table .numeric{{font:700 14px var(--mono);white-space:nowrap}}.compact th,.compact td{{padding:9px;font-size:11px}}.mono{{font-family:var(--mono);font-size:10px;word-break:break-all}}.labels{{max-width:460px}}.group-tag{{font:700 9px var(--mono);letter-spacing:.04em;background:var(--paper-2);padding:4px 6px}}.identifier{{font:9px var(--mono);color:var(--muted);margin-top:5px}}
 .filter{{width:100%;border:1px solid var(--line);background:var(--panel);color:var(--ink);font:14px var(--mono);padding:14px 16px;margin-bottom:12px;outline:none}}.filter:focus{{border-color:var(--signal);box-shadow:0 0 0 3px color-mix(in srgb,var(--signal) 18%,transparent)}}
 .warning-box{{background:var(--dark);color:#ecf2ed;padding:25px;border-left:7px solid var(--signal)}}.warning-box h3{{font:700 24px var(--serif);margin:0 0 10px}}.warning-box li{{margin:8px 0;color:#bccbd0}}.flags{{display:flex;flex-wrap:wrap;gap:5px}}.flags span{{font:9px var(--mono);padding:5px 7px;border:1px solid var(--line);background:var(--panel)}}details{{border:1px solid var(--line);background:var(--panel);padding:16px;margin-top:14px}}summary{{cursor:pointer;font-weight:700}}pre{{white-space:pre-wrap;word-break:break-word;font:10px/1.6 var(--mono);color:var(--muted);max-height:460px;overflow:auto}}
 .coverage{{width:10px;height:10px;border-radius:50%;display:block}}.coverage.yes{{background:#00a67d;box-shadow:0 0 0 3px #00a67d22}}.coverage.no{{background:#8d979b}}footer{{padding:42px 0 70px;display:flex;justify-content:space-between;color:var(--muted);font:11px var(--mono)}}
@@ -489,64 +641,64 @@ section{{padding:72px 0;border-bottom:1px solid var(--line);scroll-margin-top:54
 </head>
 <body>
 <header class="shell masthead">
-  <div><div class="kicker">Black-box platform characterization · report 01</div>
+  <div><div class="kicker">黑盒平台表征 · 实验报告 01</div>
     <h1>System <em>Decap</em></h1>
-    <p class="lede">Reconstruct a platform from software-visible behavior—without a datasheet. Every number keeps its method, scope, confidence and boundary conditions.</p>
+    <p class="lede">在没有数据手册的条件下，通过软件可见行为重建平台轮廓。每个数值均保留测量方法、作用范围、置信度和边界条件。</p>
   </div>
-  <aside class="specimen"><div class="kicker">Specimen / target</div><h3>{_h(cpu.get('model', 'Unknown CPU'))}</h3>
-    <dl><dt>Host</dt><dd>{_h(system.get('hostname'))}</dd><dt>Family</dt><dd>{_h(system.get('platform_family'))}</dd>
-      <dt>Kernel</dt><dd>{_h(system.get('kernel'))}</dd><dt>Profile</dt><dd>{_h(run.get('profile'))}</dd>
-      <dt>Run</dt><dd>{_h(run.get('started_at', '')[:19])}</dd></dl></aside>
+  <aside class="specimen"><div class="kicker">样本 / 目标机</div><h3>{_h(cpu.get('model', '未知 CPU'))}</h3>
+    <dl><dt>主机</dt><dd>{_h(system.get('hostname'))}</dd><dt>平台族</dt><dd>{_h(system.get('platform_family'))}</dd>
+      <dt>内核</dt><dd>{_h(system.get('kernel'))}</dd><dt>测试档位</dt><dd>{_h(run.get('profile'))}</dd>
+      <dt>运行时间</dt><dd>{_h(run.get('started_at', '')[:19])}</dd></dl></aside>
 </header>
-<nav class="nav"><div class="shell nav-inner"><a href="#overview">Overview</a><a href="#topology">Topology</a><a href="#memory">Memory</a><a href="#numa">NUMA</a><a href="#core">Core</a><a href="#inventory">Inventory</a><a href="#raw">Raw data</a><a href="#method">Method</a><button class="theme" id="theme" title="Toggle theme">◐</button></div></nav>
+<nav class="nav"><div class="shell nav-inner"><a href="#overview">总览</a><a href="#topology">拓扑</a><a href="#memory">内存层级</a><a href="#numa">NUMA</a><a href="#core">核心</a><a href="#inventory">硬件清点</a><a href="#raw">原始数据</a><a href="#method">方法与限制</a><button class="theme" id="theme" title="切换明暗主题" aria-label="切换明暗主题">◐</button></div></nav>
 <main class="shell">
-<section id="overview"><div class="section-head"><div><div class="section-kicker">01 / Executive readout</div><h2>Platform<br>fingerprint</h2></div><p class="section-intro">Use these headline metrics for fast machine comparisons; hover to inspect the inference basis. High confidence means direct inventory or stable hardware counting. Medium and low values are black-box lower bounds, proxies or environment-limited results.</p></div>
+<section id="overview"><div class="section-head"><div><div class="section-kicker">01 / 核心摘要</div><h2>平台<br>指纹</h2></div><p class="section-intro">这些核心指标可用于快速比较机器；悬停卡片可查看推断依据。高置信度代表直接清点或稳定的硬件计数，中、低置信度结果则属于黑盒下界、代理量或受运行环境限制的观测。</p></div>
   <div class="metrics">
-    {_metric_card(estimates.get('memory.aggregate_read_bandwidth'), 'Aggregate read')}
-    {_metric_card(estimates.get('memory.single_core_read_bandwidth'), 'Single-core read')}
-    {_metric_card(estimates.get('memory.random_latency'), 'DRAM latency')}
-    {_metric_card(estimates.get('core.max_observed_ipc'), 'Peak observed IPC')}
-    {_metric_card(estimates.get('core.frontend_width_lower_bound'), 'Frontend lower bound')}
-    {_metric_card(estimates.get('core.rob_capacity_proxy'), 'ROB window proxy')}
-    {_metric_card(estimates.get('numa.remote_latency'), 'Remote NUMA')}
-    {_metric_card(estimates.get('numa.interconnect_payload_bandwidth'), 'Interconnect payload')}
-    {_metric_card(estimates.get('core.integer_add_lanes_lower_bound'), 'Integer add throughput')}
-    {_metric_card(estimates.get('coherence.same-numa-different-core'), 'Core handoff')}
-    {_metric_card(estimates.get('tlb.first_knee'), 'First TLB knee')}
-    {_metric_card(estimates.get('branch.unpredictable_penalty'), 'Random branch cost')}
+    {_metric_card(estimates.get('memory.aggregate_read_bandwidth'), '系统聚合读取带宽')}
+    {_metric_card(estimates.get('memory.single_core_read_bandwidth'), '单核读取带宽')}
+    {_metric_card(estimates.get('memory.random_latency'), 'DRAM 随机延迟')}
+    {_metric_card(estimates.get('core.max_observed_ipc'), '最大实测 IPC')}
+    {_metric_card(estimates.get('core.frontend_width_lower_bound'), '前端宽度下界')}
+    {_metric_card(estimates.get('core.rob_capacity_proxy'), 'ROB 窗口代理值')}
+    {_metric_card(estimates.get('numa.remote_latency'), '跨 NUMA 延迟')}
+    {_metric_card(estimates.get('numa.interconnect_payload_bandwidth'), '互联有效载荷带宽')}
+    {_metric_card(estimates.get('core.integer_add_lanes_lower_bound'), '整数加法吞吐')}
+    {_metric_card(estimates.get('coherence.same-numa-different-core'), '同节点核间传递')}
+    {_metric_card(estimates.get('tlb.first_knee'), '首个 TLB 拐点')}
+    {_metric_card(estimates.get('branch.unpredictable_penalty'), '随机分支代价')}
   </div>
 </section>
-<section id="topology"><div class="section-head"><div><div class="section-kicker">02 / Placement map</div><h2>Topology</h2></div><p class="section-intro">{_h(machine_name)} · {topology.get('sockets', 0)} socket(s), {topology.get('dies', 0)} die(s), {topology.get('numa_nodes', 0)} NUMA node(s), {topology.get('physical_cores', 0)} accessible physical cores and {topology.get('logical_cpus', 0)} logical CPUs.</p></div>
+<section id="topology"><div class="section-head"><div><div class="section-kicker">02 / 放置地图</div><h2>处理器<br>拓扑</h2></div><p class="section-intro">{_h(machine_name)} · {topology.get('sockets', 0)} 个插槽、{topology.get('dies', 0)} 个 die、{topology.get('numa_nodes', 0)} 个 NUMA 节点、{topology.get('physical_cores', 0)} 个当前可访问物理核心、{topology.get('logical_cpus', 0)} 个逻辑 CPU。</p></div>
   {_topology_visual(system)}
 </section>
-<section id="memory"><div class="section-head"><div><div class="section-kicker">03 / Hierarchy</div><h2>Memory<br>system</h2></div><p class="section-intro">Dependent loads expose the latency hierarchy; parallel streams expose sustainable payload from one core to the accessible system. Working sets, thread counts and affinity remain attached to every raw point.</p></div>
+<section id="memory"><div class="section-head"><div><div class="section-kicker">03 / 存储层级</div><h2>缓存与<br>内存系统</h2></div><p class="section-intro">依赖加载用于暴露延迟层级，并行数据流用于测量从单核到整个可访问系统的可持续有效载荷。每个原始数据点均保留工作集、线程数和亲和性信息。</p></div>
   <div class="chart-grid"><div class="wide">{cache_curve}</div>{tlb_curve}{false_sharing_curve}<div class="wide">{cache_bandwidth_curve}</div>{stride_curve}{mlp_curve}<div class="wide">{bandwidth_curve}</div></div>
 </section>
-<section id="numa"><div class="section-head"><div><div class="section-kicker">04 / Fabric</div><h2>NUMA &<br>interconnect</h2></div><p class="section-intro">Pages are bound—or placed by pinned first touch—on each memory node, then accessed from every CPU node. Virtualization, containers or denied mbind permissions lower placement confidence.</p></div>
+<section id="numa"><div class="section-head"><div><div class="section-kicker">04 / 片间互联</div><h2>NUMA 与<br>互联</h2></div><p class="section-intro">页面被绑定到各内存节点；若绑定权限不足，则由固定线程首次触碰完成放置。随后从每个 CPU 节点访问这些页面。虚拟化、容器或 mbind 权限不足会降低内存放置置信度。</p></div>
   <div class="chart-grid">{numa_latency}{numa_bandwidth}</div>
 </section>
-<section id="core"><div class="section-head"><div><div class="section-kicker">05 / Microarchitecture</div><h2>Core<br>engine</h2></div><p class="section-intro">Architecture-specific scalar assembly separates frontend flow, dependency latency and independent-chain throughput. IPC uses perf retired instructions/core cycles; counter-dependent estimates remain blank when the kernel denies access.</p></div>
+<section id="core"><div class="section-head"><div><div class="section-kicker">05 / 微架构</div><h2>核心<br>执行引擎</h2></div><p class="section-intro">架构专用标量汇编分别测试前端流量、依赖延迟和独立链吞吐。IPC 由 perf 的退休指令数/核心周期计算；若内核禁止访问硬件计数器，依赖计数器的推断将明确显示为不可用。</p></div>
   <div class="chart-grid">{pipeline_chart}{branch_chart}{core_chart}{rob_curve}{core_matrix}</div>
 </section>
-<section id="inventory"><div class="section-head"><div><div class="section-kicker">06 / Static evidence</div><h2>Inventory</h2></div><p class="section-intro">Sysfs and procfs are the platform evidence exposed to the OS. Capacity and topology are usually reliable, while firmware defects, cgroup affinity and virtualization can still change the visible scope.</p></div>
+<section id="inventory"><div class="section-head"><div><div class="section-kicker">06 / 静态证据</div><h2>硬件<br>清点</h2></div><p class="section-intro">sysfs 与 procfs 是操作系统可见的平台证据。容量与拓扑通常较可靠，但固件缺陷、cgroup 亲和性限制和虚拟化仍可能改变可见范围。</p></div>
   {_inventory_tables(system)}
-  <details><summary>ISA feature flags · {len(flags)} entries</summary><div class="flags">{flag_html}</div></details>
-  <details><summary>DMI / firmware identity</summary><pre>{_h(json.dumps(dmi, ensure_ascii=False, indent=2))}</pre></details>
-  <details><summary>Kernel vulnerability mitigations</summary><pre>{_h(json.dumps(system.get('environment', {}).get('vulnerabilities', {}), ensure_ascii=False, indent=2))}</pre></details>
+  <details><summary>ISA 特性标志 · {len(flags)} 项</summary><div class="flags">{flag_html}</div></details>
+  <details><summary>DMI / 固件身份信息</summary><pre>{_h(json.dumps(dmi, ensure_ascii=False, indent=2))}</pre></details>
+  <details><summary>内核漏洞缓解状态</summary><pre>{_h(json.dumps(system.get('environment', {}).get('vulnerabilities', {}), ensure_ascii=False, indent=2))}</pre></details>
 </section>
-<section id="raw"><div class="section-head"><div><div class="section-kicker">07 / Evidence ledger</div><h2>Raw<br>observations</h2></div><p class="section-intro">This run contains {len(report.get('observations', []))} raw observations. Search by group, metric, method or label. Full JSON and CSV sit beside this HTML file.</p></div>
-  <input class="filter" id="filter" placeholder="Filter: cache_latency, operation=read, cpu_node=1 …" aria-label="Filter raw observations">
-  <div class="table-scroll"><table class="data-table" id="raw-table"><thead><tr><th>Group</th><th>Metric / method</th><th>Value</th><th>Confidence</th><th>Labels</th></tr></thead><tbody>{_raw_table(report)}</tbody></table></div>
+<section id="raw"><div class="section-head"><div><div class="section-kicker">07 / 证据台账</div><h2>原始<br>观测数据</h2></div><p class="section-intro">本次运行包含 {len(report.get('observations', []))} 个原始观测点。可按分组、指标、方法或标签搜索；完整 JSON 与 CSV 文件位于本 HTML 报告旁。</p></div>
+  <input class="filter" id="filter" placeholder="筛选：cache_latency、operation=read、cpu_node=1 …" aria-label="筛选原始观测数据">
+  <div class="table-scroll"><table class="data-table" id="raw-table"><thead><tr><th>分组</th><th>指标 / 方法</th><th>数值</th><th>置信度</th><th>标签</th></tr></thead><tbody>{_raw_table(report)}</tbody></table></div>
 </section>
-<section id="method"><div class="section-head"><div><div class="section-kicker">08 / Truth conditions</div><h2>Method &<br>limits</h2></div><p class="section-intro">Black-box characterization is not a literal chip decap: it answers what this software environment can observe. Frequency, firmware, kernel policy, virtualization, temperature, page migration and compiler behavior are all experimental conditions.</p></div>
-  <div class="warning-box"><h3>Run warnings & qualification</h3><ul>{warning_html}</ul></div>
+<section id="method"><div class="section-head"><div><div class="section-kicker">08 / 结论边界</div><h2>方法与<br>限制</h2></div><p class="section-intro">黑盒表征并非真正对芯片开盖，它回答的是当前软件环境能够观测到什么。频率、固件、内核策略、虚拟化、温度、页面迁移和编译器行为均属于实验条件。</p></div>
+  <div class="warning-box"><h3>运行警告与结果限定</h3><ul>{warning_html}</ul></div>
   <div class="chart-grid"><div class="wide">{os_chart}</div></div>
-  <details open><summary>Coverage ledger</summary><div class="table-scroll"><table class="data-table compact"><thead><tr><th>Status</th><th>Category</th><th>Metric</th><th>Kind</th><th>Nominal confidence</th></tr></thead><tbody>{_coverage(report)}</tbody></table></div></details>
-  <details><summary>Reproduction command</summary><pre>{_h(' '.join(map(str, run.get('command', []))))}</pre></details>
-  <details><summary>Run metadata</summary><pre>{_h(json.dumps({'run': run, 'tool': report.get('tool'), 'native': report.get('native_metadata')}, ensure_ascii=False, indent=2))}</pre></details>
+  <details open><summary>指标覆盖台账</summary><div class="table-scroll"><table class="data-table compact"><thead><tr><th>状态</th><th>类别</th><th>指标</th><th>类型</th><th>标称置信度</th></tr></thead><tbody>{_coverage(report)}</tbody></table></div></details>
+  <details><summary>复现命令</summary><pre>{_h(' '.join(map(str, run.get('command', []))))}</pre></details>
+  <details><summary>运行元数据</summary><pre>{_h(json.dumps({'run': run, 'tool': report.get('tool'), 'native': report.get('native_metadata')}, ensure_ascii=False, indent=2))}</pre></details>
 </section>
 </main>
-<footer class="shell"><span>System Decap v{_h(report.get('tool', {}).get('version', '?'))} · generated {generated}</span><span>{len(report.get('observations', []))} observations · {len(report.get('estimates', []))} estimates · source payload {_human_bytes(raw_json_size)}</span></footer>
+<footer class="shell"><span>System Decap v{_h(report.get('tool', {}).get('version', '?'))} · 生成时间 {generated}</span><span>{len(report.get('observations', []))} 个观测 · {len(report.get('estimates', []))} 个推断 · 源数据 {_human_bytes(raw_json_size)}</span></footer>
 <script>
 const root=document.documentElement,button=document.getElementById('theme');
 button.addEventListener('click',()=>{{root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';}});

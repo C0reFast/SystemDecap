@@ -37,7 +37,7 @@ lscpu.txt          便于人工复核的 lscpu 快照
 # 默认完整运行；推荐用于正式比较
 ./system-decap run --profile standard
 
-# 更大的工作集、更长采样、完整核心对矩阵（最多 2016 对）
+# 更大的工作集、更长采样、全部可见逻辑 CPU 对矩阵
 ./system-decap run --profile deep
 
 # CI/安装检查，不应作为性能结论
@@ -65,8 +65,8 @@ lscpu.txt          便于人工复核的 lscpu 快照
 |---|---:|---:|---:|---|---|
 | `smoke` | 64 KiB | 8 MiB | 15 ms | 代表关系 | 编译/冒烟 |
 | `quick` | ≥32 MiB | ≥64 MiB | 80 ms | 每种关系一对 | 快速侦察 |
-| `standard` | ≥128 MiB | ≥256 MiB | 200 ms | 每种关系一对 | 正式基线 |
-| `deep` | ≥512 MiB | ≥1 GiB | 500 ms | 尽可能完整矩阵 | 架构研究 |
+| `standard` | ≥128 MiB | ≥256 MiB | 200 ms | 全部物理核心对 | 正式基线 |
+| `deep` | ≥512 MiB | ≥1 GiB | 500 ms | 全部可见逻辑 CPU 对 | 架构研究 |
 
 未显式传 `--memory-mib` 时，工具会把 STREAM、NUMA 和部分 latency 工作集自动扩展到主核可见 LLC 的至少 2 倍（受 profile 安全上限约束）。`--memory-mib` 是每个 STREAM 数组的显式大小；Triad 峰值驻留约为该值的 3 倍。deep 或超大 LLC 平台可能消耗数 GiB，请按目标机内存调整。
 

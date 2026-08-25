@@ -661,7 +661,7 @@ void benchmark_cache_latency(const Options &options, std::vector<Observation> &o
                        {"stride_bytes", "64"}});
     }
   } catch (const std::exception &error) {
-    warnings.push_back(std::string("cache-latency probe stopped: ") + error.what());
+    warnings.push_back(std::string("缓存延迟探针提前停止：") + error.what());
   }
 }
 
@@ -694,7 +694,7 @@ void benchmark_tlb(const Options &options, std::vector<Observation> &observation
                        {"working_set_bytes", std::to_string(bytes)}});
     }
   } catch (const std::exception &error) {
-    warnings.push_back(std::string("TLB probe stopped: ") + error.what());
+    warnings.push_back(std::string("TLB 探针提前停止：") + error.what());
   }
 }
 
@@ -866,7 +866,7 @@ void benchmark_bandwidth(const Options &options, const std::vector<CpuInfo> &cpu
       }
     }
   } catch (const std::exception &error) {
-    warnings.push_back(std::string("memory-bandwidth probe stopped: ") + error.what());
+    warnings.push_back(std::string("内存带宽探针提前停止：") + error.what());
   }
 }
 
@@ -895,7 +895,7 @@ void benchmark_cache_bandwidth(const Options &options, const std::vector<CpuInfo
       }
     }
   } catch (const std::exception &error) {
-    warnings.push_back(std::string("cache-bandwidth sweep stopped: ") + error.what());
+    warnings.push_back(std::string("缓存带宽扫描提前停止：") + error.what());
   }
 }
 
@@ -940,7 +940,7 @@ void benchmark_stride_prefetch(const Options &options, int cpu,
                        {"working_set_bytes", std::to_string(bytes)}});
     }
   } catch (const std::exception &error) {
-    warnings.push_back(std::string("stride/prefetch sweep stopped: ") + error.what());
+    warnings.push_back(std::string("步长/预取扫描提前停止：") + error.what());
   }
 }
 
@@ -999,7 +999,7 @@ void benchmark_memory_parallelism(const Options &options, int cpu,
                        {"working_set_bytes", std::to_string(total_working_set)}});
     }
   } catch (const std::exception &error) {
-    warnings.push_back(std::string("memory-level parallelism probe stopped: ") + error.what());
+    warnings.push_back(std::string("内存级并行探针提前停止：") + error.what());
   }
 }
 
@@ -1053,28 +1053,57 @@ void benchmark_core_latency(const Options &options, const std::vector<CpuInfo> &
                             std::vector<Observation> &observations,
                             std::vector<std::string> &warnings) {
   if (cpus.size() < 2) {
-    warnings.push_back("core-to-core latency skipped: process affinity exposes fewer than two CPUs");
+    warnings.push_back("已跳过核间延迟：当前进程亲和性范围内不足两个 CPU");
     return;
   }
-  std::vector<std::pair<CpuInfo, CpuInfo>> pairs;
-  std::set<std::string> represented;
-  for (std::size_t left = 0; left < cpus.size(); ++left) {
-    for (std::size_t right = left + 1; right < cpus.size(); ++right) {
-      const auto relation = cpu_relation(cpus[left], cpus[right]);
-      if (options.profile == "deep" || represented.insert(relation).second) {
-        pairs.emplace_back(cpus[left], cpus[right]);
+  using Pair = std::tuple<CpuInfo, CpuInfo, std::string>;
+  std::vector<Pair> pairs;
+  if (options.profile == "deep") {
+    for (std::size_t left = 0; left < cpus.size(); ++left) {
+      for (std::size_t right = left + 1; right < cpus.size(); ++right) {
+        pairs.emplace_back(cpus[left], cpus[right], "logical-cpu");
+      }
+    }
+  } else if (options.profile == "standard") {
+    const auto physical = physical_cpus(cpus);
+    for (std::size_t left = 0; left < physical.size(); ++left) {
+      for (std::size_t right = left + 1; right < physical.size(); ++right) {
+        pairs.emplace_back(physical[left], physical[right], "physical-core");
+      }
+    }
+
+    // Physical-core representatives intentionally omit SMT siblings. Keep one
+    // additional pair so the relation summary still describes the SMT path.
+    for (std::size_t left = 0; left < cpus.size(); ++left) {
+      bool found = false;
+      for (std::size_t right = left + 1; right < cpus.size(); ++right) {
+        if (cpu_relation(cpus[left], cpus[right]) == "smt-sibling") {
+          pairs.emplace_back(cpus[left], cpus[right], "representative");
+          found = true;
+          break;
+        }
+      }
+      if (found) break;
+    }
+  } else {
+    std::set<std::string> represented;
+    for (std::size_t left = 0; left < cpus.size(); ++left) {
+      for (std::size_t right = left + 1; right < cpus.size(); ++right) {
+        const auto relation = cpu_relation(cpus[left], cpus[right]);
+        if (represented.insert(relation).second) {
+          pairs.emplace_back(cpus[left], cpus[right], "representative");
+        }
       }
     }
   }
-  if (options.profile == "deep" && pairs.size() > 2016) {
-    pairs.resize(2016);
-    warnings.push_back("deep core-latency matrix capped at 2016 CPU pairs");
-  }
+
+  const std::size_t pair_count = std::max<std::size_t>(1, pairs.size());
   const std::size_t rounds = options.profile == "smoke" ? 2000
       : options.profile == "quick" ? 20000
-      : options.profile == "deep" ? 100000
-                                  : 50000;
-  for (const auto &[left, right] : pairs) {
+      : options.profile == "deep"
+          ? std::clamp<std::size_t>(5000000 / pair_count, 5000, 100000)
+          : std::clamp<std::size_t>(2000000 / pair_count, 2000, 50000);
+  for (const auto &[left, right, matrix_scope] : pairs) {
     const double latency = ping_pong_latency(left.cpu, right.cpu, rounds);
     add_observation(observations, "core_latency", "cacheline_handoff_latency", latency,
                     "ns/one-way", "high", "release/acquire cache-line ping-pong",
@@ -1082,7 +1111,9 @@ void benchmark_core_latency(const Options &options, const std::vector<CpuInfo> &
                      {"cpu_b", std::to_string(right.cpu)},
                      {"node_a", std::to_string(left.node)},
                      {"node_b", std::to_string(right.node)},
-                     {"relation", cpu_relation(left, right)}});
+                     {"relation", cpu_relation(left, right)},
+                     {"matrix_scope", matrix_scope},
+                     {"rounds", std::to_string(rounds)}});
   }
 }
 
@@ -1212,7 +1243,7 @@ void benchmark_numa(const Options &options, const std::vector<CpuInfo> &cpus,
     return;
   }
   if (by_node.size() < 2)
-    warnings.push_back("remote NUMA paths unavailable: fewer than two accessible NUMA nodes; local diagonal still measured");
+    warnings.push_back("跨 NUMA 路径不可用：可访问 NUMA 节点不足两个；仍测量本地对角线");
   const std::size_t llc = last_level_cache_bytes(cpus.front().cpu);
   const std::size_t base_bytes = (options.profile == "quick" ? 64U : 256U) * 1024U * 1024U;
   const std::size_t numa_cap = options.profile == "quick" ? 512ULL * 1024ULL * 1024ULL
@@ -1226,8 +1257,8 @@ void benchmark_numa(const Options &options, const std::vector<CpuInfo> &cpus,
       std::string bind_error;
       const bool bound = bind_memory(buffer.bytes(), buffer.size(), memory_node, bind_error);
       if (!bound && !warned_bind) {
-        warnings.push_back("mbind unavailable (" + bind_error +
-                           "); NUMA placement falls back to pinned first-touch");
+        warnings.push_back("mbind 不可用（" + bind_error +
+                           "）；NUMA 放置退化为固定线程首次触碰");
         warned_bind = true;
       }
       for (const auto &[cpu_node, destination_cpus] : by_node) {
@@ -1264,8 +1295,8 @@ void benchmark_numa(const Options &options, const std::vector<CpuInfo> &cpus,
                         bandwidth_labels);
       }
     } catch (const std::exception &error) {
-      warnings.push_back("NUMA node " + std::to_string(memory_node) +
-                         " probe stopped: " + error.what());
+      warnings.push_back("NUMA 节点 " + std::to_string(memory_node) +
+                         " 的探针提前停止：" + error.what());
     }
   }
 }
@@ -1598,13 +1629,13 @@ void benchmark_rob(const Options &options, std::vector<Observation> &observation
                     {{"lower_bound", std::to_string((*knee > step ? *knee - step : 0) * 2)},
                      {"upper_bound", std::to_string((*knee + step) * 3)}});
   } else {
-    warnings.push_back("ROB/reorder-window knee was inconclusive; see raw overlap curve");
+    warnings.push_back("ROB/乱序窗口拐点不明确；请检查原始重叠曲线");
   }
 #else
   (void)options;
   (void)observations;
   (void)cpu;
-  warnings.push_back("ROB/reorder-window probe is currently x86/C86-only; ARM64 reports it as unavailable");
+  warnings.push_back("ROB/乱序窗口探针目前仅支持 x86/C86；ARM64 将该指标标记为不可用");
 #endif
 }
 
@@ -1646,14 +1677,14 @@ void benchmark_os_overheads(const Options &options, const std::vector<CpuInfo> &
                     "faults", "high", "getrusage delta around anonymous first touch",
                     {{"bytes", std::to_string(fault_bytes)}});
   } catch (const std::exception &error) {
-    warnings.push_back(std::string("page-fault probe stopped: ") + error.what());
+    warnings.push_back(std::string("缺页探针提前停止：") + error.what());
   }
 
   if (cpus.size() < 2) return;
   int to_second[2] = {-1, -1};
   int to_first[2] = {-1, -1};
   if (pipe2(to_second, O_CLOEXEC) != 0 || pipe2(to_first, O_CLOEXEC) != 0) {
-    warnings.push_back(std::string("scheduler handoff probe pipe setup failed: ") + std::strerror(errno));
+    warnings.push_back(std::string("调度交接探针创建管道失败：") + std::strerror(errno));
     for (const int fd : to_second) if (fd >= 0) close(fd);
     for (const int fd : to_first) if (fd >= 0) close(fd);
     return;
@@ -1767,8 +1798,8 @@ int main(int argc, char **argv) {
     const int primary_cpu = cpus.front().cpu;
     PerfGroup perf_probe;
     if (!perf_probe.available()) {
-      warnings.push_back("hardware performance counters unavailable: " + perf_probe.error() +
-                         "; IPC and exact per-core-cycle estimates are omitted");
+      warnings.push_back("硬件性能计数器不可用：" + perf_probe.error() +
+                         "；已省略 IPC 与精确的每核心周期估计");
     }
 
     auto section = [](std::string_view name) { std::cerr << "[system-decap] " << name << "\n"; };

@@ -107,7 +107,7 @@ load p0 → load p1 → load p2 → ...
 - cross NUMA / same socket；
 - cross socket。
 
-quick/standard 每类选代表 pair；deep 采集可见 CPU pair，最多 2016 对。该值包括 atomic polling 与协议状态转换，不等于物理 wire latency，但非常适合拓扑比较。
+smoke/quick 每类选代表 pair；standard 采集全部可见物理核心 pair，deep 采集全部可见逻辑 CPU pair。该值包括 atomic polling 与协议状态转换，不等于物理 wire latency，但非常适合拓扑比较。
 
 ### False sharing
 
