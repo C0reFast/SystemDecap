@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
 
 from .catalog import as_dicts
 from .discover import discover
 from .runner import ROOT, build_native, execute
+from .server import serve_reports
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -38,12 +40,16 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--build-dir", type=Path, default=ROOT / "build")
     build.add_argument("--clean", action="store_true")
 
+    serve = subparsers.add_parser(
+        "serve", help="serve JSON reports in the browser comparison workspace"
+    )
+    serve.add_argument("--reports-dir", type=Path, default=ROOT / "reports")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--open-browser", action="store_true")
+
     inventory = subparsers.add_parser("inventory", help="print system inventory JSON without benchmarks")
     inventory.add_argument("--output", type=Path)
-
-    regenerate = subparsers.add_parser("report", help="regenerate HTML from report.json")
-    regenerate.add_argument("input", type=Path)
-    regenerate.add_argument("--output", type=Path)
 
     subparsers.add_parser("list-metrics", help="print the measurement catalog")
     return parser
@@ -64,13 +70,13 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(text)
             return 0
-        if args.command == "report":
-            from .report import render_report
-
-            data = json.loads(args.input.read_text(encoding="utf-8"))
-            output = args.output or args.input.with_name("report.html")
-            output.write_text(render_report(data), encoding="utf-8")
-            print(output.resolve())
+        if args.command == "serve":
+            serve_reports(
+                args.reports_dir,
+                host=args.host,
+                port=args.port,
+                open_browser=args.open_browser,
+            )
             return 0
         if args.command == "list-metrics":
             for item in as_dicts():
@@ -92,9 +98,12 @@ def main(argv: list[str] | None = None) -> int:
                 memory_mtps=args.memory_mtps,
                 only_probes=args.only,
             )
-            print(f"Report: {output / 'report.html'}")
-            print(f"JSON:   {output / 'report.json'}")
-            print(f"CSV:    {output / 'observations.csv'}")
+            print(f"JSON: {output / 'report.json'}")
+            print(f"CSV:  {output / 'observations.csv'}")
+            print(
+                "Web:  ./system-decap serve "
+                f"--reports-dir {shlex.quote(str(output.parent))} --open-browser"
+            )
             print(f"Observations: {len(report['observations'])}, estimates: {len(report['estimates'])}")
             return 0
     except (OSError, RuntimeError, ValueError) as error:

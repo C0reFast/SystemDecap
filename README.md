@@ -1,6 +1,6 @@
 # System Decap
 
-System Decap 是面向全新 Linux 服务器平台的黑盒表征工具集。在没有 CPU/SoC 数据手册的条件下，它通过 sysfs/procfs 清点、固定 CPU/内存放置的微基准、`perf_event_open` 硬件计数器和保守推断，重建 CPU 核心、缓存、内存、NUMA 与一致性互联的可观察轮廓，并生成单文件离线 HTML、JSON 和 CSV 报告。
+System Decap 是面向全新 Linux 服务器平台的黑盒表征工具集。在没有 CPU/SoC 数据手册的条件下，它通过 sysfs/procfs 清点、固定 CPU/内存放置的微基准、`perf_event_open` 硬件计数器和保守推断，重建 CPU 核心、缓存、内存、NUMA 与一致性互联的可观察轮廓。测试结果以 JSON/CSV 保存，并由浏览器报告工作台按需加载、绘图和执行多报告对比。
 
 支持：
 
@@ -21,7 +21,6 @@ System Decap 是面向全新 Linux 服务器平台的黑盒表征工具集。在
 输出目录默认为 `reports/<hostname>-<timestamp>/`：
 
 ```text
-report.html        可直接用浏览器打开的离线图形报告
 report.json        系统清点、原始观测、推断和置信度
 observations.csv   所有原始测量点，便于二次分析
 native-raw.json    C++ 微基准的未经推断输出
@@ -46,18 +45,50 @@ lscpu.txt          便于人工复核的 lscpu 快照
 # 查看所有可独立运行的底层探针
 ./build/sdc-native --list-probes
 
-# 只运行单个探针，或组合运行多个探针；仍会生成完整 JSON/HTML/CSV 报告
+# 只运行单个探针，或组合运行多个探针；仍会生成完整 JSON/CSV 数据
 ./system-decap run --profile standard --only memory-bandwidth
 ./system-decap run --profile quick --only numa,core-latency
 
 # 只清点，不执行负载
 ./system-decap inventory --output inventory.json
 
-# 编译、查看指标目录、由已有 JSON 重建 HTML
+# 编译、查看指标目录
 ./system-decap build
 ./system-decap list-metrics
-./system-decap report reports/host-time/report.json
+
+# 启动 B/S 报告工作台并自动打开浏览器
+./system-decap serve --reports-dir reports --open-browser
 ```
+
+## 浏览器报告与多报告对比
+
+`run` 不再为每次测试复制一份嵌入数据的 HTML。报告仓库中的
+`reports/*/report.json` 是唯一展示数据源，统一前端通过同源 HTTP API 加载：
+
+| 接口 | 用途 |
+|---|---|
+| `GET /api/reports` | 返回报告目录和主机、CPU、Profile、时间等摘要 |
+| `GET /api/reports/<id>` | 返回一份完整的 `report.json` |
+| `GET /` | 报告选择、单报告分析和多报告对比工作台 |
+
+启动服务后访问 `http://127.0.0.1:8000/`。左侧勾选 1–8 份报告，第一份作为对比
+基线；前端会显示核心指标横向表、相对基线百分比、平台条件和多组原始曲线叠加。
+选择会写入 URL，因此可以收藏或分享同一组对比。单报告模式保留核心摘要、缓存/TLB/
+内存/分支曲线、NUMA 与核间延迟矩阵、原始观测筛选；大规模核间矩阵使用 Canvas
+绘制并支持缩放。
+
+默认只监听 `127.0.0.1`。从远程测试机查看时，推荐使用 SSH 端口转发：
+
+```bash
+# 测试机
+./system-decap serve --reports-dir /root/SystemDecap/reports --port 8000
+
+# 本地电脑
+ssh -L 8000:127.0.0.1:8000 root@TARGET
+```
+
+确需局域网直接访问时可以传 `--host 0.0.0.0`，但内置服务没有身份认证；应配合
+防火墙或带认证的反向代理，不能直接暴露到不可信网络。
 
 自定义 STREAM 每个数组的工作集和每个吞吐点的最短持续时间：
 

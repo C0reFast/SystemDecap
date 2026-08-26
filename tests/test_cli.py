@@ -1,4 +1,6 @@
 import unittest
+import io
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -48,6 +50,38 @@ class CliTests(unittest.TestCase):
             execute.call_args.kwargs["only_probes"],
             ["timer,numa", "core-latency"],
         )
+
+    def test_serve_command_starts_the_report_repository(self):
+        with patch("system_decap.cli.serve_reports") as serve_reports:
+            status = main([
+                "serve",
+                "--reports-dir", "/srv/system-decap/reports",
+                "--host", "0.0.0.0",
+                "--port", "9010",
+            ])
+
+        self.assertEqual(status, 0)
+        serve_reports.assert_called_once_with(
+            Path("/srv/system-decap/reports"),
+            host="0.0.0.0",
+            port=9010,
+            open_browser=False,
+        )
+
+    def test_run_points_to_json_and_the_browser_workspace(self):
+        with patch("system_decap.cli.execute") as execute:
+            execute.return_value = (
+                Path("/tmp/reports/host-run"),
+                {"observations": [], "estimates": []},
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                status = main(["run", "--profile", "smoke", "--skip-build"])
+
+        self.assertEqual(status, 0)
+        self.assertIn("/tmp/reports/host-run/report.json", output.getvalue())
+        self.assertIn("system-decap serve", output.getvalue())
+        self.assertNotIn("report.html", output.getvalue())
 
 
 if __name__ == "__main__":

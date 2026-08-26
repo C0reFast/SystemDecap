@@ -189,7 +189,4 @@ def execute(
     )
     _write_csv(output_dir / "observations.csv", report["observations"])
     (output_dir / "lscpu.txt").write_text(system.get("commands", {}).get("lscpu", ""), encoding="utf-8")
-    from .report import render_report
-
-    (output_dir / "report.html").write_text(render_report(report), encoding="utf-8")
     return output_dir, report

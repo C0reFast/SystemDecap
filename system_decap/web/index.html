@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>System Decap · 架构观测台</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="System Decap 报告首页">
+      <span class="brand-mark" aria-hidden="true">SD</span>
+      <span><strong>System Decap</strong><small>架构观测台</small></span>
+    </a>
+    <div class="topbar-actions">
+      <span class="connection" id="connection">连接报告仓库…</span>
+      <button class="quiet-button" id="theme" type="button">明暗</button>
+    </div>
+  </header>
+  <div class="workspace">
+    <aside class="report-rail" aria-label="报告目录">
+      <div class="rail-heading">
+        <div><span class="overline">REPORT VAULT</span><h1>报告仓库</h1></div>
+        <button class="quiet-button" id="refresh" type="button">刷新</button>
+      </div>
+      <label class="search">
+        <span>检索</span>
+        <input id="report-search" type="search" placeholder="主机、处理器、Profile">
+      </label>
+      <div class="selection-bar">
+        <span id="selection-count">已选 0 份</span>
+        <button id="compare" type="button" disabled>打开对比</button>
+      </div>
+      <div id="report-list" class="report-list" aria-live="polite"></div>
+    </aside>
+    <main id="app" class="app-shell" tabindex="-1">
+      <section class="empty-state">
+        <span class="pulse" aria-hidden="true"></span>
+        <p>正在读取 JSON 报告目录</p>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/assets/app.js"></script>
+</body>
+</html>
