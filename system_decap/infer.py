@@ -53,10 +53,38 @@ def _bandwidth_basis(item: dict[str, Any] | None, prefix: str) -> str:
         return "未测量"
     coverage = item.get("labels", {}).get("working_set_exceeds_llc")
     if coverage == "true":
-        return f"{prefix}；工作集已达到整机/读取节点 LLC 的 2 倍"
+        return f"{prefix}；工作集已达到整机/读取节点 LLC 的 4 倍"
     if coverage == "false":
         return f"{prefix}；工作集未越过整机 LLC，结果可能主要来自缓存"
     return f"{prefix}；缺少 LLC 覆盖证据"
+
+
+def _dram_bandwidth_points(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return only points whose working set was verified to exceed aggregate LLC."""
+    result = []
+    for item in items:
+        labels = item.get("labels", {})
+        if labels.get("working_set_exceeds_llc") != "true":
+            continue
+        working_set = labels.get("working_set_bytes")
+        llc = labels.get("aggregate_llc_bytes", labels.get("reader_node_llc_bytes"))
+        if working_set is not None and llc is not None:
+            try:
+                if int(working_set) < int(llc) * 4:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        result.append(item)
+    return result
+
+
+def _memory_bandwidth_upper_bound(system: dict[str, Any]) -> float | None:
+    value = system.get("memory_bandwidth_theoretical", {}).get("upper_bound_gbps")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
 
 
 def _primary_cache(system: dict[str, Any]) -> dict[int, dict[str, Any]]:
@@ -298,26 +326,60 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
     ))
 
     bandwidth = _matching(observations, "memory_bandwidth", "stream_bandwidth")
-    read_bandwidth = [item for item in bandwidth if item["labels"].get("operation") == "read"]
+    raw_read_bandwidth = [
+        item for item in bandwidth if item["labels"].get("operation") == "read"
+    ]
+    llc_qualified_read = _dram_bandwidth_points(raw_read_bandwidth)
+    theoretical = system.get("memory_bandwidth_theoretical", {})
+    theoretical_limit = _memory_bandwidth_upper_bound(system)
+    limit_with_tolerance = theoretical_limit * 1.05 if theoretical_limit else None
+    above_theoretical = [
+        item for item in llc_qualified_read
+        if limit_with_tolerance is not None and float(item["value"]) > limit_with_tolerance
+    ]
+    read_bandwidth = [item for item in llc_qualified_read if item not in above_theoretical]
+    diagnostics["memory_bandwidth"] = {
+        "theoretical_upper_bound_gbps": theoretical_limit,
+        "validation_tolerance_percent": 5.0 if theoretical_limit else None,
+        "above_theoretical_limit": len(above_theoretical),
+        "cache_polluted_or_unverified": len(raw_read_bandwidth) - len(llc_qualified_read),
+    }
+    estimates.append(_estimate(
+        "memory.theoretical_peak_bandwidth", "内存配置理论峰值带宽",
+        theoretical_limit, "GB/s", "medium" if theoretical_limit else "unavailable",
+        (theoretical.get("source", "内存配置清点") if theoretical_limit else
+         "SMBIOS 内存设备位宽/速率记录缺失或不完整；可同时传 --memory-channels 与 --memory-mtps"),
+        "这是配置清点得到的保守上界，不是可持续性能目标；2DPC 时可能高估。",
+        "bandwidth",
+    ))
     one_core = [item for item in read_bandwidth if item["labels"].get("threads") == "1"]
     one_core_best = max(one_core, key=lambda item: item["value"], default=None)
     max_read = max(read_bandwidth, key=lambda x: x["value"], default=None)
+    if above_theoretical and not read_bandwidth:
+        no_dram_basis = "合格工作集的观测值全部超过内存配置理论上界，已判为无效"
+    else:
+        no_dram_basis = "没有工作集明确越过整机 LLC 的合格观测点；缓存污染点仅保留在原始曲线中"
+    limit_caveat = (
+        f"已排除 {len(above_theoretical)} 个超出配置理论上界 5% 容差的观测点。"
+        if above_theoretical else ""
+    )
     estimates.append(_estimate(
         "memory.single_core_read_bandwidth", "单核内存读带宽",
         one_core_best["value"] if one_core_best else None, "GB/s",
         _bandwidth_quality(one_core_best),
-        _bandwidth_basis(one_core_best, "固定在一个物理核心上的流式有效载荷"),
-        category="bandwidth",
+        (_bandwidth_basis(one_core_best, "固定在一个物理核心上的流式有效载荷")
+         if one_core_best else no_dram_basis),
+        limit_caveat, "bandwidth",
     ))
     estimates.append(_estimate(
         "memory.aggregate_read_bandwidth", "系统聚合内存读带宽",
         max_read["value"] if max_read else None, "GB/s",
         _bandwidth_quality(max_read),
-        _bandwidth_basis(
+        (_bandwidth_basis(
             max_read,
             f"最佳实测点使用 {max_read['labels'].get('threads')} 个线程" if max_read else "未测量",
-        ),
-        "只统计有效载荷带宽，不包含写分配和协议流量。", "bandwidth",
+        ) if max_read else no_dram_basis),
+        "只统计有效载荷带宽，不包含写分配和协议流量。" + limit_caveat, "bandwidth",
     ))
     if max_read and one_core:
         max_threads = int(max_read["labels"].get("threads", 1))
@@ -339,7 +401,9 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
         ))
     operation_names = {"write": "写入", "copy": "复制", "triad": "三元运算"}
     for operation in ("write", "copy", "triad"):
-        items = [item for item in bandwidth if item["labels"].get("operation") == operation]
+        items = _dram_bandwidth_points(
+            item for item in bandwidth if item["labels"].get("operation") == operation
+        )
         best = max(items, key=lambda x: x["value"], default=None)
         single = [item for item in items if item["labels"].get("threads") == "1"]
         single_best = max(single, key=lambda item: item["value"], default=None)
@@ -384,28 +448,34 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
             "×", "high" if local_quality == remote_quality == "high" else "medium",
             "远端延迟中位数 / 本地延迟中位数", category="numa",
         ))
-    numa_bw = _matching(observations, "numa", "read_bandwidth")
+    raw_numa_bw = _matching(observations, "numa", "read_bandwidth")
+    numa_llc_qualified = _dram_bandwidth_points(raw_numa_bw)
+    numa_bw = [
+        item for item in numa_llc_qualified
+        if limit_with_tolerance is None or float(item["value"]) <= limit_with_tolerance
+    ]
+    diagnostics["numa_bandwidth"] = {
+        "raw_points": len(raw_numa_bw),
+        "qualified_points": len(numa_bw),
+        "rejected_points": len(raw_numa_bw) - len(numa_bw),
+    }
     local_bw = [item["value"] for item in numa_bw if item["labels"].get("local") == "true"]
     remote_bw = [item["value"] for item in numa_bw if item["labels"].get("local") == "false"]
     local_bw_items = [item for item in numa_bw if item["labels"].get("local") == "true"]
     remote_bw_items = [item for item in numa_bw if item["labels"].get("local") == "false"]
     estimates.append(_estimate(
         "numa.local_payload_bandwidth", "NUMA 本地有效读带宽", _median(local_bw), "GB/s",
-        "high" if local_bw_items and all(
-            item.get("confidence") == "high"
-            and item.get("labels", {}).get("working_set_exceeds_llc") == "true"
-            for item in local_bw_items
-        ) else "low" if local_bw_items else "unavailable",
-        "NUMA 读取有效载荷矩阵对角线中位数", category="numa",
+        "high" if local_bw_items and all(item.get("confidence") == "high"
+                                          for item in local_bw_items)
+        else "medium" if local_bw_items else "unavailable",
+        "NUMA 读取有效载荷矩阵中通过 4× LLC 与配置上界校验的对角线中位数",
+        category="numa",
     ))
     estimates.append(_estimate(
         "numa.interconnect_payload_bandwidth", "跨 NUMA 混合路径有效读带宽",
         _median(remote_bw), "GB/s",
-        "medium" if remote_bw_items and all(
-            item.get("labels", {}).get("working_set_exceeds_llc") == "true"
-            for item in remote_bw_items
-        ) else "low" if remote_bw_items else "unavailable",
-        "所有非本地路径的有效载荷中位数",
+        "medium" if remote_bw_items else "unavailable",
+        "所有通过 4× LLC 与配置上界校验的非本地路径有效载荷中位数",
         "同插槽跨 NPS 与跨插槽路径可能同时存在；应优先查看拆分后的路径指标。", "numa",
     ))
     for relation, key_prefix, name in (
@@ -428,9 +498,8 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
         bandwidth_quality = (
             "high" if relation_bandwidths and all(
                 item.get("confidence") == "high"
-                and item.get("labels", {}).get("working_set_exceeds_llc") == "true"
                 for item in relation_bandwidths
-            ) else "low" if relation_bandwidths else "unavailable"
+            ) else "medium" if relation_bandwidths else "unavailable"
         )
         estimates.append(_estimate(
             f"numa.{key_prefix}_latency", f"{name}随机延迟",
@@ -441,7 +510,7 @@ def infer(system: dict[str, Any], native: dict[str, Any]) -> tuple[list[dict[str
             f"numa.{key_prefix}_payload_bandwidth", f"{name}有效读带宽",
             _median(item["value"] for item in relation_bandwidths), "GB/s",
             bandwidth_quality, f"{name}路径有效载荷中位数",
-            "仅当工作集确认越过读取节点 LLC 时标为高置信度。", "numa",
+            "仅保留工作集达到读取节点 LLC 4 倍且未超过内存配置理论上界的点。", "numa",
         ))
 
     core_latencies = _matching(observations, "core_latency", "cacheline_handoff_latency")

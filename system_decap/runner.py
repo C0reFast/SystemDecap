@@ -15,7 +15,7 @@ from typing import Any
 
 from . import __version__
 from .catalog import as_dicts
-from .discover import discover
+from .discover import discover, memory_bandwidth_override
 from .infer import infer
 
 
@@ -75,6 +75,30 @@ def _default_output(hostname: str) -> Path:
     return ROOT / "reports" / f"{safe_host}-{stamp}"
 
 
+def _bandwidth_validation_warnings(diagnostics: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    memory = diagnostics.get("memory_bandwidth", {})
+    upper = memory.get("theoretical_upper_bound_gbps")
+    above = int(memory.get("above_theoretical_limit") or 0)
+    cache_points = int(memory.get("cache_polluted_or_unverified") or 0)
+    if upper is not None and above:
+        warnings.append(
+            f"内存配置理论上界为 {float(upper):g} GB/s；已从 DRAM 摘要排除 {above} 个"
+            "超过上界 5% 容差的观测点"
+        )
+    if cache_points:
+        warnings.append(
+            f"已从 DRAM 摘要排除 {cache_points} 个工作集未确认达到整机 LLC 4 倍的读取点；"
+            "这些点仍保留在原始曲线中"
+        )
+    numa_rejected = int(diagnostics.get("numa_bandwidth", {}).get("rejected_points") or 0)
+    if numa_rejected:
+        warnings.append(
+            f"NUMA/互联带宽摘要排除了 {numa_rejected} 个未通过 4× LLC 或配置理论上界校验的点"
+        )
+    return warnings
+
+
 def execute(
     profile: str = "standard",
     output_dir: Path | None = None,
@@ -83,11 +107,15 @@ def execute(
     duration_ms: int | None = None,
     seed: int = 0x5DEC4A9,
     skip_build: bool = False,
+    memory_channels: int | None = None,
+    memory_mtps: int | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     if platform.system() != "Linux":
         raise RuntimeError("System Decap currently requires Linux procfs/sysfs and perf_event_open")
     if platform.machine().lower() not in ("x86_64", "amd64", "aarch64", "arm64"):
         raise RuntimeError(f"unsupported architecture: {platform.machine()}")
+    if (memory_channels is None) != (memory_mtps is None):
+        raise ValueError("--memory-channels and --memory-mtps must be provided together")
     build_dir = (build_dir or ROOT / "build").resolve()
     binary = build_dir / "sdc-native"
     if not skip_build or not binary.exists():
@@ -96,6 +124,10 @@ def execute(
     print("[system-decap] inventory procfs/sysfs", file=sys.stderr)
     started = datetime.now().astimezone()
     system = discover()
+    if memory_channels is not None and memory_mtps is not None:
+        system["memory_bandwidth_theoretical"] = memory_bandwidth_override(
+            memory_channels, memory_mtps
+        )
     output_dir = (output_dir or _default_output(system["hostname"])).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -116,6 +148,8 @@ def execute(
         raise RuntimeError(f"native probe produced invalid JSON: {error}") from error
 
     estimates, diagnostics = infer(system, native)
+    report_warnings = list(native.get("warnings", []))
+    report_warnings.extend(_bandwidth_validation_warnings(diagnostics))
     finished = datetime.now().astimezone()
     report = {
         "schema_version": "1.0",
@@ -131,6 +165,8 @@ def execute(
             "finished_at": finished.isoformat(),
             "duration_seconds": (finished - started).total_seconds(),
             "profile": profile,
+            "memory_channels_override": memory_channels,
+            "memory_mtps_override": memory_mtps,
             "command": command,
             "output_directory": str(output_dir),
         },
@@ -139,7 +175,7 @@ def execute(
         "observations": native.get("observations", []),
         "estimates": estimates,
         "diagnostics": diagnostics,
-        "warnings": native.get("warnings", []),
+        "warnings": report_warnings,
         "metric_catalog": as_dicts(),
     }
     (output_dir / "native-raw.json").write_text(

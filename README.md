@@ -59,6 +59,15 @@ lscpu.txt          便于人工复核的 lscpu 快照
   --output /var/tmp/platform-characterization
 ```
 
+若固件没有暴露 SMBIOS 内存设备记录，可手动提供 64-bit 通道数和配置速率。以
+12 通道 DDR5-6400 为例，报告会计算 `12 × 8 B × 6400 MT/s = 614.4 GB/s`，并用它
+校验实测值：
+
+```bash
+./system-decap run --profile standard \
+  --memory-channels 12 --memory-mtps 6400
+```
+
 ## Profile 作用域
 
 | Profile | 缓存 sweep 上限 | STREAM 默认每数组 | 吞吐点时长 | 核间测量 | 用途 |
@@ -69,10 +78,16 @@ lscpu.txt          便于人工复核的 lscpu 快照
 | `deep` | ≥512 MiB | ≥1 GiB | 500 ms | 全部可见逻辑 CPU 对 | 架构研究 |
 
 未显式传 `--memory-mib` 时，工具会按 `shared_cpu_list` 去重所有可见 LLC 实例，
-把 STREAM 工作集扩展到整机 LLC 的至少 2 倍，并把 NUMA 工作集扩展到读取节点 LLC
-的至少 2 倍；实际值同时受 profile 上限与 `MemAvailable` 安全预算约束。
+把 STREAM 工作集扩展到整机 LLC 的至少 4 倍，并把 NUMA 工作集扩展到读取节点 LLC
+的至少 4 倍；实际值同时受 profile 上限与 `MemAvailable` 安全预算约束。
 `--memory-mib` 是每个 STREAM 数组的显式大小；Triad 峰值驻留约为该值的 3 倍。
-若显式值或安全预算不足以越过 LLC，原始值仍会保留，但报告会降为低置信度并警告。
+若显式值或安全预算不足，原始值仍会保留在曲线和 CSV/JSON 中，但不会进入 DRAM
+或互联带宽摘要。
+
+读取 kernel 使用 x86/C86 AVX2/SSE2 或 ARM64 NEON 手写向量汇编。匿名内存仍是普通
+write-back 映射；`MOVNTDQA`、`PREFETCHNTA`、ARM `LDNP` 等指令只是特定内存类型或
+缓存策略下的提示，不能在用户态保证绕过 LLC。因此工具采用“大工作集 + 汇编流式
+加载 + SMBIOS/手动理论上界”三重证据，而不把 non-temporal hint 宣称为硬件旁路。
 
 ## 当前测量面
 
@@ -103,7 +118,7 @@ lscpu.txt          便于人工复核的 lscpu 快照
 2. 停止调度抖动较大的服务，确保目标 CPU 和内存未被 cgroup 限制。
 3. 保持 governor 一致；若比较核心周期，优先允许非特权 `perf_event_open`。
 4. 每台机器至少运行 3 次 standard，比较中位数与离散程度，不用单次极值下结论。
-5. STREAM 工作集至少大于有效 LLC 的 2–4 倍。报告若发现工作集不足，会降低“DRAM latency”的置信度。
+5. STREAM 和 NUMA 带宽工作集至少达到对应 LLC 的 4 倍；不足的点只用于缓存诊断，不进入 DRAM/互联摘要。
 6. NUMA 测试优先允许 `mbind`；权限不足时工具退化到 pinned first-touch，并在报告警告。
 
 常见权限检查：
@@ -132,7 +147,7 @@ ARM64 应在 ARM64 目标机上原生构建，以免交叉编译的 libc/sysroot
 
 ## 结果边界
 
-- “总带宽”是本进程在其 affinity/NUMA 可见范围内的最大可持续 payload，不是 DRAM 引脚理论速率。
+- “总带宽”是本进程在其 affinity/NUMA 可见范围内、通过 4× LLC 和配置理论上界校验的最大可持续 payload，不是 DRAM 引脚理论速率。
 - “互联带宽”是确认越过读取节点 LLC 的 remote memory 有效读 payload，不包含协议开销，不能直接等价为链路 GT/s 或位宽；同插槽与跨插槽必须分开比较。
 - NOP IPC 是前端/退休综合下界，可能由 µop cache、NOP 特殊处理或 retire width 主导。
 - adds/cycle 是可用整数执行吞吐下界，不是硬件端口数量的直接读数。

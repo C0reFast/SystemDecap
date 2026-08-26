@@ -16,6 +16,7 @@ METRICS = [
     ("latency", "并发内存带宽压力下的随机加载延迟", "measured", "medium"),
     ("latency", "NUMA 本地/远端内存延迟矩阵", "measured", "high"),
     ("bandwidth", "单核读取、写入、复制与三元运算带宽", "measured", "high"),
+    ("bandwidth", "SMBIOS/手动通道与速率得到的内存配置理论上界", "inventory", "medium"),
     ("bandwidth", "聚合带宽随核心数扩展曲线", "measured", "high"),
     ("bandwidth", "NUMA 本地/远端读取带宽矩阵", "measured", "high"),
     ("bandwidth", "跨 NUMA 互联有效载荷带宽", "inferred", "medium"),

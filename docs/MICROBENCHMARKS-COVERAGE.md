@@ -22,7 +22,7 @@
 | `CoreClockChecker` | 单核/多核负载下的核心时钟 | `pipeline/effective_core_frequency` 与 `compute_scaling/effective_core_frequency`；同时清点 cpufreq policy、governor、min/max/current | 扩展覆盖。精确核心周期依赖 `perf_event_open` 权限；不把 TSC/CNTVCT 当成核心时钟 |
 | `InstructionRate` | x86/ARM 多种整数、浮点、融合和向量指令的延迟/吞吐 | 标量整数 add/mul 与 FP64 add/mul 的依赖链、四/八独立链，输出 Gop/s、ops/cycle、cycles/op、IPC | 部分覆盖。覆盖整数与 FP64 执行能力类别，但未穷举 AVX/AVX-512/NEON/SVE、AES、除法、转换、宏融合等每个参考微内核 |
 | `LoadedMemoryLatency` | 在不同内存带宽压力下测随机加载延迟 | `loaded_memory_latency` 同时输出压力线程数、实际并发读取 GB/s 与依赖加载 ns/access | 原生等价，并增加实测压力强度曲线 |
-| `MemoryBandwidth` | 单/多线程数据侧读写复制；private/shared；指令侧 4/8 字节 NOP | `memory_bandwidth` 的 read/write/copy/triad 物理核心扩展；`cache_bandwidth` 工作集曲线；`instruction_fetch` 的 x86 1/4/8 字节 NOP 和 A64 4 字节 NOP | 部分到扩展覆盖。已有 private 分片与代码足迹能力；未把多个核心读取同一地址的 request combining 模式作为“带宽”主结果，也未提供每种手写 AVX/NEON 变体 |
+| `MemoryBandwidth` | 单/多线程数据侧读写复制；private/shared；指令侧 4/8 字节 NOP | `memory_bandwidth` 的 read/write/copy/triad 物理核心扩展；read 使用 x86/C86 AVX2/SSE2 或 ARM64 NEON 手写汇编；`cache_bandwidth` 工作集曲线；`instruction_fetch` 的 x86 1/4/8 字节 NOP 和 A64 4 字节 NOP | 部分到扩展覆盖。已有 private 分片、代码足迹、4× LLC 与配置理论上界校验；未把多个核心读取同一地址的 request combining 模式作为“带宽”主结果，也未穷举每种 ISA 变体 |
 | `MemoryLatency` | 缓存/内存随机延迟、TLB、hugepage、store-to-load forwarding | `cache_latency`、`tlb_latency`、`page_policy`、`store_forwarding` | 扩展覆盖主要类别。页面策略记录实际 `AnonHugePages`；STLF 覆盖同址 8→8、部分 4→8、错位与跨缓存行，未复刻参考项目的 x86 128-bit FP/vector 特例 |
 | `mt_instructionrate` | 多线程指令吞吐与 SMT/核心扩展 | `compute_scaling` 对 NUMA 均衡物理核心按 1/2/4/… 扩展，并单测一组 SMT sibling；同步记录有效频率 | 部分到扩展覆盖。当前扩展内核为整数加法，不穷举参考项目全部 ISA 微内核 |
 | `GpuMemLatency` | OpenCL GPU 全局/本地/纹理内存延迟、带宽、原子与指令率 | 无 | 范围外。当前产品承诺是 Linux CPU 平台（x86-64、ARM64、C86），没有把 OpenCL 设备作为目标 |

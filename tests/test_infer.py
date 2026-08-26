@@ -21,9 +21,11 @@ class InferTests(unittest.TestCase):
             {"group": "cache_latency", "metric": "random_load_latency", "value": 4.0,
              "unit": "ns/access", "labels": {"working_set_bytes": "65536"}},
             {"group": "memory_bandwidth", "metric": "stream_bandwidth", "value": 12.5,
-             "unit": "GB/s", "labels": {"operation": "read", "threads": "1"}},
+             "unit": "GB/s", "labels": {"operation": "read", "threads": "1",
+                                                  "working_set_exceeds_llc": "true"}},
             {"group": "memory_bandwidth", "metric": "stream_bandwidth", "value": 41.0,
-             "unit": "GB/s", "labels": {"operation": "read", "threads": "2"}},
+             "unit": "GB/s", "labels": {"operation": "read", "threads": "2",
+                                                  "working_set_exceeds_llc": "true"}},
             {"group": "numa", "metric": "load_latency", "value": 80.0,
              "unit": "ns/access", "labels": {"local": "true"}},
             {"group": "numa", "metric": "load_latency", "value": 144.0,
@@ -37,7 +39,7 @@ class InferTests(unittest.TestCase):
         self.assertEqual(by_key["memory.aggregate_read_bandwidth"]["value"], 41.0)
         self.assertAlmostEqual(by_key["numa.remote_latency_penalty"]["value"], 1.8)
 
-    def test_cache_sized_aggregate_bandwidth_is_not_high_confidence_dram(self):
+    def test_cache_sized_bandwidth_is_not_published_as_dram(self):
         for item in self.native["observations"]:
             if item["group"] == "memory_bandwidth":
                 item["labels"].update({
@@ -52,14 +54,108 @@ class InferTests(unittest.TestCase):
             if item["key"] == "memory.aggregate_read_bandwidth"
         )
 
-        self.assertEqual(aggregate["confidence"], "low")
-        self.assertIn("未越过整机 LLC", aggregate["basis"])
+        self.assertFalse(aggregate["available"])
+        self.assertIsNone(aggregate["value"])
+        self.assertIn("没有工作集明确越过", aggregate["basis"])
         single = next(
             item for item in estimates
             if item["key"] == "memory.single_core_read_bandwidth"
         )
-        self.assertEqual(single["confidence"], "low")
-        self.assertIn("未越过整机 LLC", single["basis"])
+        self.assertFalse(single["available"])
+        self.assertIsNone(single["value"])
+
+    def test_cache_polluted_peak_is_excluded_from_dram_summary(self):
+        self.native["observations"].extend([
+            {"group": "memory_bandwidth", "metric": "stream_bandwidth", "value": 1452.0,
+             "unit": "GB/s", "confidence": "low",
+             "labels": {"operation": "read", "threads": "128",
+                        "working_set_exceeds_llc": "false"}},
+            {"group": "memory_bandwidth", "metric": "stream_bandwidth", "value": 580.0,
+             "unit": "GB/s", "confidence": "high",
+             "labels": {"operation": "read", "threads": "128",
+                        "working_set_exceeds_llc": "true"}},
+            {"group": "memory_bandwidth", "metric": "stream_bandwidth", "value": 900.0,
+             "unit": "GB/s", "confidence": "low",
+             "labels": {"operation": "read", "threads": "1",
+                        "working_set_exceeds_llc": "false"}},
+            {"group": "memory_bandwidth", "metric": "stream_bandwidth", "value": 30.0,
+             "unit": "GB/s", "confidence": "high",
+             "labels": {"operation": "read", "threads": "1",
+                        "working_set_exceeds_llc": "true"}},
+        ])
+
+        estimates, _ = infer(self.system, self.native)
+        by_key = {item["key"]: item for item in estimates}
+
+        self.assertEqual(by_key["memory.aggregate_read_bandwidth"]["value"], 580.0)
+        self.assertEqual(by_key["memory.single_core_read_bandwidth"]["value"], 30.0)
+
+    def test_bandwidth_above_inventory_upper_bound_is_excluded(self):
+        self.system["memory_bandwidth_theoretical"] = {
+            "upper_bound_gbps": 614.4,
+            "source": "SMBIOS 已安装内存设备数据位宽 × 配置速率之和",
+        }
+        self.native["observations"].extend([
+            {"group": "memory_bandwidth", "metric": "stream_bandwidth", "value": 1452.0,
+             "unit": "GB/s", "confidence": "high",
+             "labels": {"operation": "read", "threads": "128",
+                        "working_set_exceeds_llc": "true"}},
+            {"group": "memory_bandwidth", "metric": "stream_bandwidth", "value": 580.0,
+             "unit": "GB/s", "confidence": "high",
+             "labels": {"operation": "read", "threads": "128",
+                        "working_set_exceeds_llc": "true"}},
+        ])
+
+        estimates, diagnostics = infer(self.system, self.native)
+        by_key = {item["key"]: item for item in estimates}
+
+        self.assertEqual(by_key["memory.theoretical_peak_bandwidth"]["value"], 614.4)
+        self.assertEqual(by_key["memory.aggregate_read_bandwidth"]["value"], 580.0)
+        self.assertIn("排除 1 个超出", by_key["memory.aggregate_read_bandwidth"]["caveat"])
+        self.assertEqual(diagnostics["memory_bandwidth"]["above_theoretical_limit"], 1)
+
+    def test_legacy_two_x_llc_label_is_revalidated_against_four_x_threshold(self):
+        self.native["observations"].extend([
+            {"group": "memory_bandwidth", "metric": "stream_bandwidth", "value": 1452.0,
+             "unit": "GB/s", "confidence": "high",
+             "labels": {"operation": "read", "threads": "128",
+                        "working_set_bytes": str(512 * 1024**2),
+                        "aggregate_llc_bytes": str(256 * 1024**2),
+                        "working_set_exceeds_llc": "true"}},
+            {"group": "memory_bandwidth", "metric": "stream_bandwidth", "value": 580.0,
+             "unit": "GB/s", "confidence": "high",
+             "labels": {"operation": "read", "threads": "128",
+                        "working_set_bytes": str(1024 * 1024**2),
+                        "aggregate_llc_bytes": str(256 * 1024**2),
+                        "working_set_exceeds_llc": "true"}},
+        ])
+
+        estimates, _ = infer(self.system, self.native)
+        by_key = {item["key"]: item for item in estimates}
+
+        self.assertEqual(by_key["memory.aggregate_read_bandwidth"]["value"], 580.0)
+
+    def test_only_above_theoretical_points_make_summary_unavailable(self):
+        self.system["memory_bandwidth_theoretical"] = {"upper_bound_gbps": 614.4}
+        self.native["observations"] = [
+            item for item in self.native["observations"]
+            if item["group"] != "memory_bandwidth"
+        ]
+        self.native["observations"].append({
+            "group": "memory_bandwidth", "metric": "stream_bandwidth", "value": 1452.0,
+            "unit": "GB/s", "confidence": "high",
+            "labels": {"operation": "read", "threads": "128",
+                       "working_set_exceeds_llc": "true"},
+        })
+
+        estimates, _ = infer(self.system, self.native)
+        aggregate = next(
+            item for item in estimates
+            if item["key"] == "memory.aggregate_read_bandwidth"
+        )
+
+        self.assertFalse(aggregate["available"])
+        self.assertIn("全部超过", aggregate["basis"])
 
     def test_cache_inventory_becomes_estimate(self):
         estimates, diagnostics = infer(self.system, self.native)
@@ -162,6 +258,30 @@ class InferTests(unittest.TestCase):
         self.assertEqual(by_key["numa.cross_socket_latency"]["value"], 255.0)
         self.assertEqual(by_key["numa.same_socket_remote_payload_bandwidth"]["value"], 180.0)
         self.assertEqual(by_key["numa.cross_socket_payload_bandwidth"]["value"], 92.0)
+
+    def test_numa_cache_polluted_and_impossible_bandwidth_points_are_excluded(self):
+        self.system["memory_bandwidth_theoretical"] = {"upper_bound_gbps": 614.4}
+        self.native["observations"].extend([
+            {"group": "numa", "metric": "read_bandwidth", "value": 2081.0,
+             "unit": "GB/s", "confidence": "low",
+             "labels": {"local": "false", "relation": "cross-numa-same-socket",
+                        "working_set_exceeds_llc": "false"}},
+            {"group": "numa", "metric": "read_bandwidth", "value": 900.0,
+             "unit": "GB/s", "confidence": "high",
+             "labels": {"local": "false", "relation": "cross-numa-same-socket",
+                        "working_set_exceeds_llc": "true"}},
+            {"group": "numa", "metric": "read_bandwidth", "value": 180.0,
+             "unit": "GB/s", "confidence": "high",
+             "labels": {"local": "false", "relation": "cross-numa-same-socket",
+                        "working_set_exceeds_llc": "true"}},
+        ])
+
+        estimates, diagnostics = infer(self.system, self.native)
+        by_key = {item["key"]: item for item in estimates}
+
+        self.assertEqual(by_key["numa.same_socket_remote_payload_bandwidth"]["value"], 180.0)
+        self.assertEqual(by_key["numa.interconnect_payload_bandwidth"]["value"], 180.0)
+        self.assertEqual(diagnostics["numa_bandwidth"]["rejected_points"], 2)
 
     def test_pipeline_unavailable_estimates_include_pmu_runtime_failure(self):
         self.native["metadata"] = {

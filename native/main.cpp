@@ -256,6 +256,17 @@ std::string platform_family() {
 #endif
 }
 
+std::string stream_read_kernel_name() {
+#if defined(__x86_64__)
+  return __builtin_cpu_supports("avx2") ? "x86-avx2-vector-inline-assembly"
+                                        : "x86-sse2-vector-inline-assembly";
+#elif defined(__aarch64__)
+  return "arm64-neon-vector-inline-assembly";
+#else
+  return "portable-scalar";
+#endif
+}
+
 double seconds_between(Clock::time_point begin, Clock::time_point end) {
   return std::chrono::duration<double>(end - begin).count();
 }
@@ -511,6 +522,7 @@ void emit_json(const Options &options, const std::vector<Observation> &observati
   emit_string(std::cout, "architecture", architecture_name());
   emit_string(std::cout, "platform_family", platform_family());
   emit_string(std::cout, "profile", options.profile);
+  emit_string(std::cout, "stream_read_kernel", stream_read_kernel_name());
   std::cout << "\"seed\":" << options.seed << ",\"perf_available\":"
             << (perf.core.available ? "true" : "false") << ',';
   emit_string(std::cout, "perf_error", perf.core.error);
@@ -923,6 +935,91 @@ struct StreamResult {
   std::uint64_t passes = 0;
 };
 
+std::uint64_t stream_read_vector_assembly(const std::uint64_t *data,
+                                          std::size_t elements) {
+  const auto *cursor = reinterpret_cast<const std::byte *>(data);
+  const auto *end = cursor + elements * sizeof(std::uint64_t);
+#if defined(__x86_64__)
+  if (__builtin_cpu_supports("avx2")) {
+    const std::size_t vector_bytes = static_cast<std::size_t>(end - cursor) / 256U * 256U;
+    const auto *vector_end = cursor + vector_bytes;
+    if (cursor != vector_end) {
+      asm volatile(
+          "1:\n\t"
+          "vmovdqu   0(%[cursor]), %%ymm0\n\t"
+          "vmovdqu  32(%[cursor]), %%ymm1\n\t"
+          "vmovdqu  64(%[cursor]), %%ymm2\n\t"
+          "vmovdqu  96(%[cursor]), %%ymm3\n\t"
+          "vmovdqu 128(%[cursor]), %%ymm4\n\t"
+          "vmovdqu 160(%[cursor]), %%ymm5\n\t"
+          "vmovdqu 192(%[cursor]), %%ymm6\n\t"
+          "vmovdqu 224(%[cursor]), %%ymm7\n\t"
+          "addq $256, %[cursor]\n\t"
+          "cmpq %[vector_end], %[cursor]\n\t"
+          "jb 1b\n\t"
+          "vzeroupper\n\t"
+          : [cursor] "+r"(cursor)
+          : [vector_end] "r"(vector_end)
+          : "cc", "memory", "ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5",
+            "ymm6", "ymm7");
+    }
+  } else {
+    const std::size_t vector_bytes = static_cast<std::size_t>(end - cursor) / 128U * 128U;
+    const auto *vector_end = cursor + vector_bytes;
+    if (cursor != vector_end) {
+      asm volatile(
+          "1:\n\t"
+          "movdqu   0(%[cursor]), %%xmm0\n\t"
+          "movdqu  16(%[cursor]), %%xmm1\n\t"
+          "movdqu  32(%[cursor]), %%xmm2\n\t"
+          "movdqu  48(%[cursor]), %%xmm3\n\t"
+          "movdqu  64(%[cursor]), %%xmm4\n\t"
+          "movdqu  80(%[cursor]), %%xmm5\n\t"
+          "movdqu  96(%[cursor]), %%xmm6\n\t"
+          "movdqu 112(%[cursor]), %%xmm7\n\t"
+          "addq $128, %[cursor]\n\t"
+          "cmpq %[vector_end], %[cursor]\n\t"
+          "jb 1b\n\t"
+          : [cursor] "+r"(cursor)
+          : [vector_end] "r"(vector_end)
+          : "cc", "memory", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5",
+            "xmm6", "xmm7");
+    }
+  }
+#elif defined(__aarch64__)
+  const std::size_t vector_bytes = static_cast<std::size_t>(end - cursor) / 128U * 128U;
+  const auto *vector_end = cursor + vector_bytes;
+  if (cursor != vector_end) {
+    asm volatile(
+        "1:\n\t"
+        "ldp q0, q1, [%[cursor], #0]\n\t"
+        "ldp q2, q3, [%[cursor], #32]\n\t"
+        "ldp q4, q5, [%[cursor], #64]\n\t"
+        "ldp q6, q7, [%[cursor], #96]\n\t"
+        "add %[cursor], %[cursor], #128\n\t"
+        "cmp %[cursor], %[vector_end]\n\t"
+        "b.lo 1b\n\t"
+        : [cursor] "+r"(cursor)
+        : [vector_end] "r"(vector_end)
+        : "cc", "memory", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7");
+  }
+#endif
+  std::uint64_t sink = static_cast<std::uint64_t>(elements);
+  while (cursor < end) {
+    std::uint64_t value = 0;
+#if defined(__x86_64__)
+    asm volatile("movq (%1), %0" : "=r"(value) : "r"(cursor) : "memory");
+#elif defined(__aarch64__)
+    asm volatile("ldr %0, [%1]" : "=r"(value) : "r"(cursor) : "memory");
+#else
+    std::memcpy(&value, cursor, sizeof(value));
+#endif
+    sink ^= value;
+    cursor += sizeof(value);
+  }
+  return sink;
+}
+
 StreamResult run_stream(StreamOperation operation, const std::vector<int> &cpus,
                         std::size_t bytes_per_array, int duration_ms,
                         int memory_init_cpu = -1) {
@@ -977,7 +1074,7 @@ StreamResult run_stream(StreamOperation operation, const std::vector<int> &cpus,
       while (!stop.load(std::memory_order_relaxed)) {
         switch (operation) {
           case StreamOperation::Read:
-            for (std::size_t index = begin; index < end; ++index) sum += a_ptr[index];
+            sum ^= stream_read_vector_assembly(a_ptr + begin, end - begin);
             break;
           case StreamOperation::Write:
             for (std::size_t index = begin; index < end; ++index) a_ptr[index] = sum + 1;
@@ -1041,21 +1138,22 @@ void benchmark_bandwidth(const Options &options, const std::vector<CpuInfo> &cpu
   physical_ids.reserve(physical.size());
   for (const auto &cpu : physical) physical_ids.push_back(cpu.cpu);
   const std::size_t aggregate_llc = aggregate_last_level_cache_bytes(physical_ids);
-  const std::size_t automatic_cap = options.profile == "quick" ? 512ULL * 1024ULL * 1024ULL
-      : options.profile == "deep" ? 4ULL * 1024ULL * 1024ULL * 1024ULL
-                                  : 2ULL * 1024ULL * 1024ULL * 1024ULL;
+  const std::size_t automatic_cap = options.profile == "smoke" ? 64ULL * 1024ULL * 1024ULL
+      : options.profile == "quick" ? 2ULL * 1024ULL * 1024ULL * 1024ULL
+      : options.profile == "deep" ? 16ULL * 1024ULL * 1024ULL * 1024ULL
+                                  : 8ULL * 1024ULL * 1024ULL * 1024ULL;
   const std::size_t available = memory_available_bytes();
   const std::size_t safe_per_array = available > 0 ? available / 6 : automatic_cap;
   const std::size_t desired_bytes = options.memory_explicit
-      ? requested_bytes : std::max(requested_bytes, aggregate_llc * 2);
+      ? requested_bytes : std::max(requested_bytes, aggregate_llc * 4);
   const std::size_t bytes = std::max<std::size_t>(4096,
       std::min(desired_bytes, options.memory_explicit
           ? safe_per_array : std::min(automatic_cap, safe_per_array)));
   const bool read_working_set_exceeds_llc =
-      aggregate_llc > 0 && bytes >= aggregate_llc * 2;
+      aggregate_llc > 0 && bytes >= aggregate_llc * 4;
   if (!read_working_set_exceeds_llc) {
     warnings.push_back(
-        "内存带宽工作集未达到整机 LLC 的 2 倍；结果可能包含缓存带宽，已降低置信度"
+        "内存带宽工作集未达到整机 LLC 的 4 倍；结果可能包含缓存带宽，不会进入 DRAM 摘要"
         "（工作集=" + std::to_string(bytes) + " 字节，整机 LLC=" +
         std::to_string(aggregate_llc) + " 字节）");
   }
@@ -1078,10 +1176,12 @@ void benchmark_bandwidth(const Options &options, const std::vector<CpuInfo> &cpu
         for (std::size_t index = 0; index < count; ++index) selected.push_back(physical[index].cpu);
         const auto result = run_stream(operation, selected, bytes, options.duration_ms);
         const std::size_t working_set = bytes * stream_array_count(operation);
-        const bool exceeds_llc = aggregate_llc > 0 && working_set >= aggregate_llc * 2;
+        const bool exceeds_llc = aggregate_llc > 0 && working_set >= aggregate_llc * 4;
         add_observation(observations, "memory_bandwidth", "stream_bandwidth",
                         result.gigabytes_per_second, "GB/s", exceeds_llc ? "high" : "low",
-                        "parallel pinned streaming kernel; payload bytes",
+                        operation == StreamOperation::Read
+                            ? "architecture-specific vector assembly streaming loads; payload bytes"
+                            : "parallel pinned streaming kernel; payload bytes",
                         {{"operation", stream_name(operation)},
                          {"threads", std::to_string(count)},
                          {"bytes_per_array", std::to_string(bytes)},
@@ -1089,6 +1189,10 @@ void benchmark_bandwidth(const Options &options, const std::vector<CpuInfo> &cpu
                          {"aggregate_llc_bytes", std::to_string(aggregate_llc)},
                          {"bytes_per_thread", std::to_string(working_set / count)},
                          {"working_set_exceeds_llc", exceeds_llc ? "true" : "false"},
+                         {"dram_working_set_threshold", "4x-aggregate-llc"},
+                         {"read_kernel", operation == StreamOperation::Read
+                                             ? stream_read_kernel_name() : "compiler-vectorized"},
+                         {"cache_bypass", "not-guaranteed-for-write-back-memory"},
                          {"cpu_scope", "physical-cores"}});
       }
     }
@@ -1713,7 +1817,7 @@ double read_existing(std::uint64_t *data, std::size_t elements, const std::vecto
       std::uint64_t sum = 0;
       std::uint64_t count = 0;
       while (!stop.load(std::memory_order_relaxed)) {
-        for (std::size_t index = begin; index < end; ++index) sum += data[index];
+        sum ^= stream_read_vector_assembly(data + begin, end - begin);
         ++count;
       }
       passes[worker] = count;
@@ -1749,8 +1853,10 @@ void benchmark_numa(const Options &options, const std::vector<CpuInfo> &cpus,
   if (by_node.size() < 2)
     warnings.push_back("跨 NUMA 路径不可用：可访问 NUMA 节点不足两个；仍测量本地对角线");
   const std::size_t base_bytes = (options.profile == "quick" ? 64U : 256U) * 1024U * 1024U;
-  const std::size_t numa_cap = options.profile == "quick" ? 512ULL * 1024ULL * 1024ULL
-                                                         : 2ULL * 1024ULL * 1024ULL * 1024ULL;
+  const std::size_t numa_cap = options.profile == "quick"
+      ? 2ULL * 1024ULL * 1024ULL * 1024ULL
+      : options.profile == "deep" ? 16ULL * 1024ULL * 1024ULL * 1024ULL
+                                  : 8ULL * 1024ULL * 1024ULL * 1024ULL;
   std::map<int, std::size_t> node_llc_bytes;
   std::size_t largest_node_llc = 0;
   for (const auto &[node, node_cpus] : by_node) {
@@ -1761,7 +1867,7 @@ void benchmark_numa(const Options &options, const std::vector<CpuInfo> &cpus,
   }
   const std::size_t requested_bytes = options.memory_mib * 1024U * 1024U;
   const std::size_t desired_bytes = options.memory_explicit
-      ? requested_bytes : std::max(base_bytes, largest_node_llc * 2);
+      ? requested_bytes : std::max(base_bytes, largest_node_llc * 4);
   const std::size_t available = memory_available_bytes();
   const std::size_t safe_bytes = available > 0 ? available / 3 : numa_cap;
   const std::size_t bytes = std::max<std::size_t>(4096,
@@ -1774,9 +1880,9 @@ void benchmark_numa(const Options &options, const std::vector<CpuInfo> &cpus,
                        "限制：期望 " + std::to_string(desired_bytes) + " 字节，实际 " +
                        std::to_string(bytes) + " 字节");
   }
-  if (largest_node_llc == 0 || bytes < largest_node_llc * 2) {
+  if (largest_node_llc == 0 || bytes < largest_node_llc * 4) {
     warnings.push_back(
-        "NUMA 带宽工作集未确认达到读取节点 LLC 的 2 倍；远端带宽可能包含缓存复用，已降低置信度"
+        "NUMA 带宽工作集未确认达到读取节点 LLC 的 4 倍；远端带宽可能包含缓存复用，不会进入摘要"
         "（工作集=" + std::to_string(bytes) + " 字节，最大节点 LLC=" +
         std::to_string(largest_node_llc) + " 字节）");
   }
@@ -1828,15 +1934,18 @@ void benchmark_numa(const Options &options, const std::vector<CpuInfo> &cpus,
         const double bandwidth = read_existing(values, elements, selected, options.duration_ms);
         auto bandwidth_labels = labels;
         const std::size_t reader_llc = node_llc_bytes[cpu_node];
-        const bool exceeds_llc = reader_llc > 0 && bytes >= reader_llc * 2;
+        const bool exceeds_llc = reader_llc > 0 && bytes >= reader_llc * 4;
         bandwidth_labels["threads"] = std::to_string(selected.size());
         bandwidth_labels["working_set_bytes"] = std::to_string(bytes);
         bandwidth_labels["reader_node_llc_bytes"] = std::to_string(reader_llc);
         bandwidth_labels["bytes_per_thread"] = std::to_string(bytes / selected.size());
         bandwidth_labels["working_set_exceeds_llc"] = exceeds_llc ? "true" : "false";
+        bandwidth_labels["dram_working_set_threshold"] = "4x-reader-node-llc";
+        bandwidth_labels["read_kernel"] = stream_read_kernel_name();
+        bandwidth_labels["cache_bypass"] = "not-guaranteed-for-write-back-memory";
         add_observation(observations, "numa", "read_bandwidth", bandwidth, "GB/s",
                         exceeds_llc ? (bound ? "high" : "medium") : "low",
-                        "pinned NUMA aggregate read payload with LLC coverage metadata",
+                        "pinned NUMA vector-assembly read payload with LLC coverage metadata",
                         bandwidth_labels);
       }
     } catch (const std::exception &error) {

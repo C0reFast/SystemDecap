@@ -116,6 +116,8 @@ METHOD_ZH = {
     "random dependent pointer chase": "随机依赖指针追逐",
     "one random dependent access per base page": "每个基础页一次随机依赖访问",
     "parallel pinned streaming kernel; payload bytes": "固定线程并行流式内核；只统计有效载荷字节",
+    "architecture-specific vector assembly streaming loads; payload bytes": "架构专用向量汇编流式加载；只统计有效载荷字节",
+    "pinned NUMA vector-assembly read payload with LLC coverage metadata": "固定 NUMA 放置的向量汇编读取有效载荷；带 LLC 覆盖证据",
     "one-core repeated streaming kernel by working-set size": "单核按工作集大小重复执行流式内核",
     "one-core sequential fixed-stride load sweep": "单核顺序固定步长加载扫描",
     "requested 8-byte payload only; cache-line traffic excluded": "只统计请求的 8 字节有效载荷；不含缓存行流量",
@@ -492,6 +494,29 @@ def _inventory_tables(system: dict[str, Any]) -> str:
         f"<td class='mono'>{_h(' '.join(map(str, n.get('distance', []))))}</td></tr>"
         for n in system.get("numa", [])
     ) or '<tr><td colspan="4">单 NUMA 节点，或 NUMA sysfs 信息不可用</td></tr>'
+    memory_rows = "".join(
+        f"<tr><td class='mono'>{_h(device.get('locator') or '—')}</td>"
+        f"<td class='mono'>{_h(device.get('bank_locator') or '—')}</td>"
+        f"<td>{_h(device.get('type') or '—')}</td>"
+        f"<td>{_h(_human_bytes(device.get('size_bytes')))}</td>"
+        f"<td>{_h(str(device.get('data_width_bits')) + ' bit' if device.get('data_width_bits') else '—')}</td>"
+        f"<td>{_h(str(device.get('configured_speed_mtps')) + ' MT/s' if device.get('configured_speed_mtps') else '—')}</td></tr>"
+        for device in system.get("memory_devices", [])
+    ) or '<tr><td colspan="6">SMBIOS 内存设备记录不可用；可用命令行参数手动提供通道数与速率</td></tr>'
+    theoretical = system.get("memory_bandwidth_theoretical", {})
+    theoretical_value = _number(theoretical.get("upper_bound_gbps"), "GB/s")
+    if theoretical.get("channels"):
+        theoretical_note = (
+            f"配置理论上界：<b>{_h(theoretical_value)}</b> · 命令行覆盖 "
+            f"{_h(theoretical.get('channels'))} 个 64-bit 通道 × "
+            f"{_h(theoretical.get('configured_speed_mtps'))} MT/s。"
+        )
+    else:
+        theoretical_note = (
+            f"配置理论上界：<b>{_h(theoretical_value)}</b> · "
+            f"已安装 {_h(theoretical.get('installed_devices', 0))} 个设备，"
+            f"其中 {_h(theoretical.get('rated_devices', 0))} 个具有完整位宽/速率数据。"
+        )
     return f"""
     <div class="split inventory-grid">
       <div><h3>缓存实例</h3><div class="table-scroll"><table class="data-table compact"><thead><tr>
@@ -500,6 +525,10 @@ def _inventory_tables(system: dict[str, Any]) -> str:
       <div><h3>NUMA 清点</h3><div class="table-scroll"><table class="data-table compact"><thead><tr>
         <th>节点</th><th>CPU</th><th>内存</th><th>距离表行</th>
       </tr></thead><tbody>{numa_rows}</tbody></table></div></div>
+      <div class="inventory-wide"><h3>内存设备与理论上界</h3><p>{theoretical_note}</p>
+      <div class="table-scroll"><table class="data-table compact"><thead><tr>
+        <th>插槽</th><th>Bank</th><th>类型</th><th>容量</th><th>数据位宽</th><th>配置速率</th>
+      </tr></thead><tbody>{memory_rows}</tbody></table></div></div>
     </div>"""
 
 
@@ -580,7 +609,7 @@ def render_report(report: dict[str, Any]) -> str:
         _obs(report, "memory_bandwidth", "stream_bandwidth"),
         lambda item: int(item["labels"]["threads"]), lambda item: OPERATION_ZH.get(item["labels"]["operation"], item["labels"]["operation"]),
         lambda x: str(int(x)), "GB/s",
-        "线程固定在不同物理核心。复制/三元运算只统计有效载荷，不包含一致性与写分配流量。",
+        "线程固定在不同物理核心。读取使用 x86/C86 AVX2/SSE2 或 ARM64 NEON 手写汇编；普通 WB 内存无法保证绕过缓存，因此摘要只接受工作集达到整机 LLC 4 倍且未超过配置理论上界的点。复制/三元运算只统计有效载荷，不包含一致性与写分配流量。",
     )
     cache_bandwidth_curve = _line_chart(
         "单核带宽随工作集变化",
@@ -821,7 +850,7 @@ section{{padding:72px 0;border-bottom:1px solid var(--line);scroll-margin-top:54
 .topology-map{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}}.node{{border:1px solid var(--line);background:var(--panel);padding:18px}}.node header{{display:grid;grid-template-columns:auto auto 1fr;align-items:baseline;gap:9px;border-bottom:1px solid var(--line);padding-bottom:12px}}.node header span{{font:10px var(--mono);color:var(--signal)}}.node header strong{{font:34px var(--serif)}}.node header small{{text-align:right;color:var(--muted)}}.cores{{display:grid;grid-template-columns:repeat(auto-fill,minmax(70px,1fr));gap:5px;padding-top:12px}}.core{{background:var(--paper-2);padding:7px 9px;display:flex;justify-content:space-between;align-items:center;border-left:2px solid var(--teal)}}.core b{{font:11px var(--mono)}}.core em{{font:9px var(--mono);color:var(--muted);font-style:normal}}
 .heatmap{{border-collapse:separate;border-spacing:5px;width:max(100%,calc((var(--columns) + 1)*76px));min-width:430px}}.heatmap th{{font:10px var(--mono);color:var(--muted);padding:8px;white-space:nowrap}}.heatmap td{{background:var(--cell);min-width:70px;padding:18px 8px;text-align:center;color:#07131b;border-radius:3px}}.heatmap td strong{{display:block;font:700 19px var(--serif)}}.heatmap td small{{font:9px var(--mono)}}.heatmap td.missing{{background:var(--paper-2);color:var(--muted)}}
 .matrix-toolbar{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 0 12px;color:var(--muted);font:10px var(--mono)}}.matrix-toolbar button{{min-width:34px;height:34px;border:1px solid var(--line);border-radius:3px;background:var(--paper-2);color:var(--ink);font:700 15px var(--mono);cursor:pointer}}.matrix-toolbar button:hover,.matrix-toolbar button:focus-visible{{border-color:var(--signal);outline:none}}.matrix-toolbar .text-button{{width:auto;padding:0 11px;font-size:10px}}.matrix-toolbar input[type=range]{{width:min(220px,35vw);accent-color:var(--signal)}}.matrix-toolbar output{{width:42px;color:var(--ink);font-weight:700}}.matrix-toolbar span{{margin-left:auto}}.matrix-viewport{{position:relative;width:100%;height:min(72vh,900px);min-height:260px;overflow:auto;overscroll-behavior:contain;border:1px solid var(--line);background:var(--paper-2);cursor:grab;touch-action:none}}.matrix-viewport:focus-visible{{outline:3px solid color-mix(in srgb,var(--signal) 35%,transparent);outline-offset:2px}}.matrix-viewport.is-dragging{{cursor:grabbing;user-select:none}}.matrix-stage{{position:relative;min-width:1px;min-height:1px}}.zoomable-heatmap .heatmap{{position:absolute;left:0;top:0;transform-origin:top left;margin:0;width:calc((var(--columns) + 1)*76px)}}.zoomable-heatmap .heatmap thead th{{position:sticky;top:0;z-index:2;background:var(--panel)}}.zoomable-heatmap .heatmap tbody th{{position:sticky;left:0;z-index:1;background:var(--panel)}}.zoomable-heatmap .heatmap thead th:first-child{{left:0;z-index:3}}
-.split{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}}.table-scroll{{overflow:auto;max-width:100%}}table{{width:100%}}.data-table{{border-collapse:collapse;background:var(--panel);font-size:13px}}.data-table th{{text-align:left;font:700 10px var(--mono);letter-spacing:.07em;color:var(--muted);background:var(--paper-2);position:sticky;top:0}}.data-table th,.data-table td{{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}}.data-table td small{{display:block;color:var(--muted);max-width:420px}}.data-table .numeric{{font:700 14px var(--mono);white-space:nowrap}}.compact th,.compact td{{padding:9px;font-size:11px}}.mono{{font-family:var(--mono);font-size:10px;word-break:break-all}}.labels{{max-width:460px}}.group-tag{{font:700 9px var(--mono);letter-spacing:.04em;background:var(--paper-2);padding:4px 6px}}.identifier{{font:9px var(--mono);color:var(--muted);margin-top:5px}}
+.split{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}}.inventory-wide{{grid-column:1/-1}}.table-scroll{{overflow:auto;max-width:100%}}table{{width:100%}}.data-table{{border-collapse:collapse;background:var(--panel);font-size:13px}}.data-table th{{text-align:left;font:700 10px var(--mono);letter-spacing:.07em;color:var(--muted);background:var(--paper-2);position:sticky;top:0}}.data-table th,.data-table td{{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}}.data-table td small{{display:block;color:var(--muted);max-width:420px}}.data-table .numeric{{font:700 14px var(--mono);white-space:nowrap}}.compact th,.compact td{{padding:9px;font-size:11px}}.mono{{font-family:var(--mono);font-size:10px;word-break:break-all}}.labels{{max-width:460px}}.group-tag{{font:700 9px var(--mono);letter-spacing:.04em;background:var(--paper-2);padding:4px 6px}}.identifier{{font:9px var(--mono);color:var(--muted);margin-top:5px}}
 .raw-tools{{display:grid;grid-template-columns:minmax(260px,1fr) auto auto;align-items:center;gap:12px;margin-bottom:12px}}.filter{{width:100%;border:1px solid var(--line);background:var(--panel);color:var(--ink);font:14px var(--mono);padding:14px 16px;outline:none}}.filter:focus{{border-color:var(--signal);box-shadow:0 0 0 3px color-mix(in srgb,var(--signal) 18%,transparent)}}.raw-toggle{{display:flex;align-items:center;gap:7px;white-space:nowrap;color:var(--ink);font:12px var(--mono);cursor:pointer}}.raw-toggle input{{width:16px;height:16px;accent-color:var(--signal)}}.raw-status{{white-space:nowrap;color:var(--muted);font:10px var(--mono)}}
 .warning-box{{background:var(--dark);color:#ecf2ed;padding:25px;border-left:7px solid var(--signal)}}.warning-box h3{{font:700 24px var(--serif);margin:0 0 10px}}.warning-box li{{margin:8px 0;color:#bccbd0}}.flags{{display:flex;flex-wrap:wrap;gap:5px}}.flags span{{font:9px var(--mono);padding:5px 7px;border:1px solid var(--line);background:var(--panel)}}details{{border:1px solid var(--line);background:var(--panel);padding:16px;margin-top:14px}}summary{{cursor:pointer;font-weight:700}}pre{{white-space:pre-wrap;word-break:break-word;font:10px/1.6 var(--mono);color:var(--muted);max-height:460px;overflow:auto}}
 .coverage{{width:10px;height:10px;border-radius:50%;display:block}}.coverage.yes{{background:#00a67d;box-shadow:0 0 0 3px #00a67d22}}.coverage.no{{background:#8d979b}}footer{{padding:42px 0 70px;display:flex;justify-content:space-between;color:var(--muted);font:11px var(--mono)}}
@@ -846,6 +875,7 @@ section{{padding:72px 0;border-bottom:1px solid var(--line);scroll-margin-top:54
 <section id="overview"><div class="section-head"><div><div class="section-kicker">01 / 核心摘要</div><h2>平台<br>指纹</h2></div><p class="section-intro">这些核心指标可用于快速比较机器；悬停卡片可查看推断依据。高置信度代表直接清点或稳定的硬件计数，中、低置信度结果则属于黑盒下界、代理量或受运行环境限制的观测。</p></div>
   <div class="metrics">
     {_metric_card(estimates.get('memory.aggregate_read_bandwidth'), '系统聚合读取带宽')}
+    {_metric_card(estimates.get('memory.theoretical_peak_bandwidth'), '配置理论峰值带宽')}
     {_metric_card(estimates.get('memory.single_core_read_bandwidth'), '单核读取带宽')}
     {_metric_card(estimates.get('memory.random_latency'), 'DRAM 随机延迟')}
     {_metric_card(estimates.get('core.max_observed_ipc'), '最大实测 IPC')}

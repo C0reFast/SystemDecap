@@ -89,13 +89,19 @@ THP 建议”和“映射确实获得匿名大页”；madvise 不保证内核�
 线程数按 `1, 2, 4, …, physical cores` 扩展。每个线程固定到不同物理核心，使用不重叠分片。输出单核值、每个扩展点、最佳聚合点和饱和趋势。
 
 工具从每个可见 CPU 的 sysfs cache 索引枚举并按 `shared_cpu_list` 去重 LLC 实例，
-而不是只读取主核所在 CCD 的一个 L3。自动工作集以“至少 2 × 可见整机 LLC”为目标，
+而不是只读取主核所在 CCD 的一个 L3。自动工作集以“至少 4 × 可见整机 LLC”为目标，
 同时受档位上限与 `/proc/meminfo` 的 `MemAvailable` 安全预算约束。每个点记录
 `working_set_bytes`、`aggregate_llc_bytes`、`bytes_per_thread` 和
-`working_set_exceeds_llc`。没有越过 LLC 的值仍保留用于诊断，但置信度强制降为低，
-不得作为 DRAM 总带宽。
+`working_set_exceeds_llc`。没有达到 4× LLC 的值仍保留用于诊断，但不得作为 DRAM
+总带宽。Python 推断层会用原始字节数字重新校验，防止 `--skip-build` 误用旧二进制的
+2× 标签。
 
-它不是理论 DDR 带宽：不读取 DIMM 速率/通道数，不把 ECC、command、coherence、RFO 和 fabric protocol bytes 计入。工作集应大于 LLC；短 profile 或用户指定过小工作集可能测到 cache bandwidth。
+read kernel 使用 x86/C86 AVX2/SSE2 或 ARM64 NEON 手写向量汇编；其余流式 kernel
+由编译器向量化。普通匿名页是 write-back 内存，手写汇编和 non-temporal hint 都不能
+保证绕过全部缓存。工具会解析 SMBIOS Type 17 的 DIMM 数据位宽与配置 MT/s，或者接受
+`--memory-channels` / `--memory-mtps` 覆盖项，计算保守配置上界。超过上界 5% 容差的
+读取点自动判为无效。不把 ECC、command、coherence、RFO 和 fabric protocol bytes
+计入有效载荷。
 
 带载延迟探针在一个固定物理核心执行 DRAM 级随机依赖加载，同时逐级增加其他物理核心上的流式读取线程。每个点同时记录 `ns/access`、压力线程数和真正达到的并发 `GB/s`，用于观察控制器/互联接近饱和时的 latency cliff。
 
@@ -117,8 +123,8 @@ iTLB 和下级取指路径的相对台阶，不应解释成 DRAM 物理带宽。
 矩阵对角线是 local，非对角线进一步按 socket 拆成
 `cross-numa-same-socket` 与 `cross-socket`。摘要分别提供同插槽跨 NPS/NUMA 和跨插槽的
 延迟与有效载荷，避免把两种物理路径混成一个数。NUMA 带宽工作集以读取节点的全部
-LLC 的 2 倍为目标；每个点保留读写 socket、放置方式与 LLC 覆盖证据。只有确认越过
-读取节点 LLC 的值才能取得高置信度。远端 payload 是互联可承载的有效载荷，不能直接
+LLC 的 4 倍为目标；每个点保留读写 socket、放置方式与 LLC 覆盖证据。只有达到 4×
+读取节点 LLC 且未超过配置理论上界的值才能进入摘要。远端 payload 是互联可承载的有效载荷，不能直接
 倒推出物理 link 宽度、lane 数或 signaling rate。
 
 待扩展：双向同时流量、all-to-all saturation、不同 hop 数、socket/die fabric 分离、coherence 与 non-coherent DMA、GPU/CXL/PCIe peer traffic。

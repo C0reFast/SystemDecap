@@ -23,6 +23,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--output", type=Path, help="report directory (default: reports/<host>-<time>)")
     run.add_argument("--build-dir", type=Path, default=ROOT / "build")
     run.add_argument("--memory-mib", type=int, help="bytes per STREAM array, in MiB")
+    run.add_argument("--memory-channels", type=int, help="installed 64-bit memory channels")
+    run.add_argument("--memory-mtps", type=int, help="configured memory transfer rate, MT/s")
     run.add_argument("--duration-ms", type=int, help="minimum duration of each throughput point")
     run.add_argument("--seed", type=int, default=0x5DEC4A9)
     run.add_argument("--skip-build", action="store_true")
@@ -78,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
                 duration_ms=args.duration_ms,
                 seed=args.seed,
                 skip_build=args.skip_build,
+                memory_channels=args.memory_channels,
+                memory_mtps=args.memory_mtps,
             )
             print(f"Report: {output / 'report.html'}")
             print(f"JSON:   {output / 'report.json'}")

@@ -236,6 +236,122 @@ def _dmi() -> dict[str, str]:
     return {field: _read(root / field) for field in fields if _read(root / field)}
 
 
+def _smbios_integer(raw: bytes, offset: int, size: int) -> int | None:
+    if offset < 0 or offset + size > len(raw):
+        return None
+    return int.from_bytes(raw[offset:offset + size], "little")
+
+
+def _smbios_string(raw: bytes, formatted_length: int, index: int) -> str:
+    if index <= 0 or formatted_length >= len(raw):
+        return ""
+    strings = raw[formatted_length:].split(b"\0")
+    if index > len(strings):
+        return ""
+    return strings[index - 1].decode(errors="replace").strip()
+
+
+def _parse_smbios_memory_device(raw: bytes) -> dict[str, Any] | None:
+    """Parse the bandwidth-relevant fields of an SMBIOS Type 17 record."""
+    if len(raw) < 0x17 or raw[0] != 17:
+        return None
+    formatted_length = min(raw[1], len(raw))
+    formatted = raw[:formatted_length]
+    size_field = _smbios_integer(formatted, 0x0C, 2)
+    if size_field == 0:
+        return None
+    if size_field == 0x7FFF:
+        extended_mib = _smbios_integer(formatted, 0x1C, 4)
+        size_bytes = extended_mib * 1024**2 if extended_mib else None
+    elif size_field == 0xFFFF or size_field is None:
+        size_bytes = None
+    elif size_field & 0x8000:
+        size_bytes = (size_field & 0x7FFF) * 1024
+    else:
+        size_bytes = size_field * 1024**2
+
+    def speed(offset: int, extended_offset: int) -> int | None:
+        value = _smbios_integer(formatted, offset, 2)
+        if value == 0xFFFF:
+            value = _smbios_integer(formatted, extended_offset, 4)
+        return value if value not in (None, 0, 0xFFFF) else None
+
+    data_width = _smbios_integer(formatted, 0x0A, 2)
+    if data_width in (0, 0xFFFF):
+        data_width = None
+    rated_speed = speed(0x15, 0x54)
+    configured_speed = speed(0x20, 0x58) or rated_speed
+    memory_types = {
+        0x12: "DDR", 0x13: "DDR2", 0x18: "DDR3", 0x1A: "DDR4",
+        0x1B: "LPDDR", 0x1C: "LPDDR2", 0x1D: "LPDDR3", 0x1E: "LPDDR4",
+        0x22: "DDR5", 0x23: "LPDDR5", 0x24: "HBM3",
+    }
+    memory_type = formatted[0x12] if formatted_length > 0x12 else 0
+    locator_index = formatted[0x10] if formatted_length > 0x10 else 0
+    bank_index = formatted[0x11] if formatted_length > 0x11 else 0
+    return {
+        "locator": _smbios_string(raw, formatted_length, locator_index),
+        "bank_locator": _smbios_string(raw, formatted_length, bank_index),
+        "type": memory_types.get(memory_type, f"SMBIOS-0x{memory_type:02x}"),
+        "size_bytes": size_bytes,
+        "data_width_bits": data_width,
+        "speed_mtps": rated_speed,
+        "configured_speed_mtps": configured_speed,
+    }
+
+
+def _memory_devices() -> list[dict[str, Any]]:
+    devices: list[dict[str, Any]] = []
+    for path in sorted(glob.glob("/sys/firmware/dmi/entries/17-*/raw")):
+        try:
+            device = _parse_smbios_memory_device(Path(path).read_bytes())
+        except (OSError, PermissionError):
+            continue
+        if device is not None:
+            devices.append(device)
+    return devices
+
+
+def _memory_bandwidth_theoretical(
+    devices: list[dict[str, Any] | None],
+) -> dict[str, Any]:
+    installed = [device for device in devices if device is not None]
+    rated = [
+        device for device in installed
+        if device.get("data_width_bits") and device.get("configured_speed_mtps")
+    ]
+    complete = bool(installed) and len(rated) == len(installed)
+    upper_bound = None
+    if complete:
+        upper_bound = sum(
+            float(device["data_width_bits"]) / 8.0
+            * float(device["configured_speed_mtps"]) / 1000.0
+            for device in rated
+        )
+    return {
+        "upper_bound_gbps": upper_bound,
+        "installed_devices": len(installed),
+        "rated_devices": len(rated),
+        "complete": complete,
+        "source": "SMBIOS 已安装内存设备数据位宽 × 配置速率之和",
+        "assumption": "每个已安装设备按独立数据总线计入；2DPC 配置可能高估实际通道上限",
+    }
+
+
+def memory_bandwidth_override(channels: int, configured_speed_mtps: int) -> dict[str, Any]:
+    if channels <= 0 or configured_speed_mtps <= 0:
+        raise ValueError("memory channels and MT/s must both be positive")
+    return {
+        "upper_bound_gbps": channels * 8.0 * configured_speed_mtps / 1000.0,
+        "channels": channels,
+        "channel_data_width_bits": 64,
+        "configured_speed_mtps": configured_speed_mtps,
+        "complete": True,
+        "source": "命令行内存通道数 × 64-bit × 配置速率",
+        "assumption": "每个通道按 64-bit 数据总线计算，不包含 ECC 位宽",
+    }
+
+
 def _environment() -> dict[str, Any]:
     vulnerabilities = {
         Path(path).name: _read(path)
@@ -290,6 +406,7 @@ def discover() -> dict[str, Any]:
     cpu = _cpuinfo()
     machine = platform.machine().lower()
     topology = _topology()
+    memory_devices = _memory_devices()
     allowed = set(topology["allowed_cpu_list"])
     meminfo: dict[str, int] = {}
     for line in _read("/proc/meminfo").splitlines():
@@ -311,6 +428,8 @@ def discover() -> dict[str, Any]:
         "caches": _caches(allowed),
         "numa": _numa(),
         "memory": meminfo,
+        "memory_devices": memory_devices,
+        "memory_bandwidth_theoretical": _memory_bandwidth_theoretical(memory_devices),
         "frequency": _frequencies(topology["allowed_cpu_list"]),
         "dmi": _dmi(),
         "environment": _environment(),

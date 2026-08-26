@@ -134,6 +134,25 @@ class ReportTests(unittest.TestCase):
         self.assertIn("perf_event_paranoid=2，nmi_watchdog=1", rendered)
         self.assertNotIn("请查看运行警告", rendered)
 
+    def test_memory_inventory_and_theoretical_limit_are_rendered_in_chinese(self):
+        report = self._base_report("standard")
+        report["system"]["memory_devices"] = [{
+            "locator": "DIMM_A1", "bank_locator": "BANK_0", "type": "DDR5",
+            "size_bytes": 32 * 1024**3, "data_width_bits": 64,
+            "configured_speed_mtps": 6400,
+        }]
+        report["system"]["memory_bandwidth_theoretical"] = {
+            "upper_bound_gbps": 614.4, "installed_devices": 12, "rated_devices": 12,
+            "source": "SMBIOS 已安装内存设备数据位宽 × 配置速率之和",
+        }
+
+        rendered = render_report(report)
+
+        self.assertIn("内存设备与理论上界", rendered)
+        self.assertIn("DIMM_A1", rendered)
+        self.assertIn("6400 MT/s", rendered)
+        self.assertIn("614.4 GB/s", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
