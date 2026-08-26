@@ -43,6 +43,13 @@ lscpu.txt          便于人工复核的 lscpu 快照
 # CI/安装检查，不应作为性能结论
 ./system-decap run --profile smoke --memory-mib 8 --duration-ms 15
 
+# 查看所有可独立运行的底层探针
+./build/sdc-native --list-probes
+
+# 只运行单个探针，或组合运行多个探针；仍会生成完整 JSON/HTML/CSV 报告
+./system-decap run --profile standard --only memory-bandwidth
+./system-decap run --profile quick --only numa,core-latency
+
 # 只清点，不执行负载
 ./system-decap inventory --output inventory.json
 
@@ -144,6 +151,11 @@ python3 -m unittest discover -s tests -v
 ```
 
 ARM64 应在 ARM64 目标机上原生构建，以免交叉编译的 libc/sysroot 与目标内核 ABI 不一致。所有架构专用汇编均由 `__x86_64__` / `__aarch64__` 隔离；C86 走 x86-64 路径并单独报告平台 family。
+
+底层实现按探针拆分在 `native/probes/`：每个文件包含一个测量模块并通过统一注册表接入；
+通用的计时、拓扑、PMU、内存映射和 JSON 能力位于 `native/runtime.hpp`，指针追逐、
+流式访存及生成代码计量位于 `native/support/`。新增探针时只需增加一个探针模块、工厂声明
+和注册表项，不需要修改主执行流程。
 
 ## 结果边界
 

@@ -20,6 +20,11 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     run = subparsers.add_parser("run", help="build probes, execute a suite, and generate reports")
     run.add_argument("--profile", choices=["smoke", "quick", "standard", "deep"], default="standard")
+    run.add_argument(
+        "--only",
+        action="append",
+        help="run only the named native probe(s); accepts comma-separated names and may repeat",
+    )
     run.add_argument("--output", type=Path, help="report directory (default: reports/<host>-<time>)")
     run.add_argument("--build-dir", type=Path, default=ROOT / "build")
     run.add_argument("--memory-mib", type=int, help="bytes per STREAM array, in MiB")
@@ -85,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
                 skip_build=args.skip_build,
                 memory_channels=args.memory_channels,
                 memory_mtps=args.memory_mtps,
+                only_probes=args.only,
             )
             print(f"Report: {output / 'report.html'}")
             print(f"JSON:   {output / 'report.json'}")

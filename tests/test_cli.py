@@ -34,6 +34,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(execute.call_args.kwargs["memory_mib"], 4096)
 
+    def test_only_probes_are_forwarded_to_runner(self):
+        with patch("system_decap.cli.execute") as execute:
+            execute.return_value = (Path("/tmp/report"), {"observations": [], "estimates": []})
+
+            status = main([
+                "run", "--profile", "smoke", "--only", "timer,numa",
+                "--only", "core-latency", "--skip-build",
+            ])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            execute.call_args.kwargs["only_probes"],
+            ["timer,numa", "core-latency"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -109,6 +109,7 @@ def execute(
     skip_build: bool = False,
     memory_channels: int | None = None,
     memory_mtps: int | None = None,
+    only_probes: list[str] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     if platform.system() != "Linux":
         raise RuntimeError("System Decap currently requires Linux procfs/sysfs and perf_event_open")
@@ -132,6 +133,8 @@ def execute(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     command = [str(binary), "--profile", profile, "--seed", str(seed)]
+    for selected in only_probes or []:
+        command += ["--only", selected]
     if memory_mib is not None:
         command += ["--memory-mib", str(memory_mib)]
     if duration_ms is not None:
