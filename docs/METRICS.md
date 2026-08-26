@@ -96,6 +96,9 @@ THP 建议”和“映射确实获得匿名大页”；madvise 不保证内核�
 总带宽。Python 推断层会用原始字节数字重新校验，防止 `--skip-build` 误用旧二进制的
 2× 标签。
 
+`standard` 档位默认每数组使用 8 GiB，避免 128 核级服务器上总工作集足够大、但每线程
+私有分片仍落入局部 LLC 的情况。显式 `--memory-mib` 仍可覆盖该默认值。
+
 read kernel 使用 x86/C86 AVX2/SSE2 或 ARM64 NEON 手写向量汇编；其余流式 kernel
 由编译器向量化。普通匿名页是 write-back 内存，手写汇编和 non-temporal hint 都不能
 保证绕过全部缓存。工具会解析 SMBIOS Type 17 的 DIMM 数据位宽与配置 MT/s，或者接受

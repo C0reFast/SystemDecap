@@ -74,7 +74,7 @@ lscpu.txt          便于人工复核的 lscpu 快照
 |---|---:|---:|---:|---|---|
 | `smoke` | 64 KiB | 8 MiB | 15 ms | 代表关系 | 编译/冒烟 |
 | `quick` | ≥32 MiB | ≥64 MiB | 80 ms | 每种关系一对 | 快速侦察 |
-| `standard` | ≥128 MiB | ≥256 MiB | 200 ms | 全部物理核心对 | 正式基线 |
+| `standard` | ≥128 MiB | 8 GiB | 200 ms | 全部物理核心对 | 正式基线 |
 | `deep` | ≥512 MiB | ≥1 GiB | 500 ms | 全部可见逻辑 CPU 对 | 架构研究 |
 
 未显式传 `--memory-mib` 时，工具会按 `shared_cpu_list` 去重所有可见 LLC 实例，

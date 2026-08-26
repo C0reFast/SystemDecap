@@ -3021,7 +3021,7 @@ Options parse_options(int argc, char **argv) {
     options.memory_mib = options.profile == "smoke" ? 8
         : options.profile == "quick" ? 64
         : options.profile == "deep" ? 1024
-                                    : 256;
+                                    : 8192;
   }
   if (options.duration_ms <= 0) {
     options.duration_ms = options.profile == "smoke" ? 15

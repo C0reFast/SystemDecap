@@ -72,11 +72,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{item['category']:12} {item['kind']:10} {item['nominal_confidence']:8} {item['metric']}")
             return 0
         if args.command == "run":
+            memory_mib = args.memory_mib
+            if memory_mib is None and args.profile == "standard":
+                memory_mib = 8192
             output, report = execute(
                 profile=args.profile,
                 output_dir=args.output,
                 build_dir=args.build_dir,
-                memory_mib=args.memory_mib,
+                memory_mib=memory_mib,
                 duration_ms=args.duration_ms,
                 seed=args.seed,
                 skip_build=args.skip_build,
